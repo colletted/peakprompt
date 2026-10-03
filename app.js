@@ -6,7 +6,7 @@ const els = {
   scrollRail: document.getElementById("scroll-rail"),
   scrollHint: document.getElementById("scroll-hint"),
   journeyLyrics: document.getElementById("journey-lyrics"),
-  modeToggle: document.getElementById("mode-toggle"),
+  viewTabs: document.getElementById("view-tabs"),
   metaTime: document.getElementById("meta-time"),
   metaAltitude: document.getElementById("meta-altitude"),
   metaLocation: document.getElementById("meta-location"),
@@ -39,13 +39,20 @@ const TUNNEL_GAP = 14;
 const TUNNEL_WORLD_SIZE = 20; // fixed world height for cavern planes
 const LAYER_IMAGE_CAP = 36;
 const WHEEL_CARD = 14; // half-extends from hub so cards cross at their centres
-const WHEEL_CAM_Z_DEFAULT = 78;
+const WHEEL_CAM_Z_BOOK = 58; // rolodex reading distance
+const WHEEL_CAM_Z_CROSS = 78; // radial cross-section viewing distance
 const WHEEL_CAM_Z_NEAR = 26;
 const WHEEL_CAM_Z_FAR = 110;
-const WHEEL_IDLE_SPIN = 0.1; // rad/s — slow carousel drift
+const WHEEL_IDLE_SPIN = 0.08; // rad/s — slow drift in cross-section
 const WHEEL_TIP = -0.38;
 const WHEEL_STACK_SIZE = 22; // shared frame size when layered into one image
 const WHEEL_STACK_Z = 0.04; // tiny depth offset so layers composite cleanly
+const BOOK_PAGE_SIZE = 16; // card size in the scroll rolodex
+/** Scroll layout — rolodex: cards hinged on a shared bottom edge. */
+const ROLODEX_STEP = 0.58; // rad between cards around the spindle
+const ROLODEX_VISIBLE = 5;
+const WHEEL_HOLD_MS = 240; // still press → collage; drag before this → cross-section
+const WHEEL_DRAG_PX = 9;
 const GALLERY_RADIUS = 40;
 const GALLERY_CARD = 9.5;
 const GALLERY_CAM_Z_DEFAULT = 96;
@@ -60,8 +67,11 @@ const _wheelQuatA = new THREE.Quaternion();
 const _wheelQuatB = new THREE.Quaternion();
 const _wheelPosA = new THREE.Vector3();
 const _wheelPosB = new THREE.Vector3();
+const _wheelPosC = new THREE.Vector3();
 const _wheelScaleA = new THREE.Vector3();
 const _wheelScaleB = new THREE.Vector3();
+const _wheelScaleC = new THREE.Vector3();
+const _wheelQuatC = new THREE.Quaternion();
 /** One threshold band per image (mid = subject cutout). */
 const TUNNEL_ROLE_FALLBACKS = ["mid", "foreground", "background"];
 const LAYER_BAKE_MAX_W = 768;
@@ -94,8 +104,12 @@ let lastLyricKey = "";
 let smoothLyricProgress = 0;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
-const VIEW_MODES = ["elevation", "wheel"];
-let viewMode = "elevation";
+/** Single experience views: path journey, zoomed-out gallery, combined wheel. */
+const EXPERIENCE_VIEWS = ["path", "zoom", "combine"];
+let experienceView = "path";
+/** Legacy flags kept in sync for path/zoom/combine branches. */
+let viewMode = "elevation"; // "elevation" | "wheel"
+let hikeArrangement = "path"; // "gallery" | "path"
 let timelineFocus = 0;
 let timelineFocusSmooth = 0;
 let timelinePointerX = 0.5; // 0..1 across viewport
@@ -116,17 +130,38 @@ let galleryPitchTarget = 0.18;
 let galleryCamZ = GALLERY_CAM_Z_DEFAULT;
 let galleryCamZSmooth = GALLERY_CAM_Z_DEFAULT;
 let galleryDrag = { active: false, x: 0, y: 0, lastX: 0, lastY: 0 };
+/** Normalized cursor in zoom-out; drives threshold brightness / hardness. */
+let galleryPointer = { nx: 0.5, ny: 0.5 };
+let galleryThreshold = { bright: 1, intensity: 0.55 };
 let wheelRoot = null;
 let wheelPivot = null;
 let wheelPlanes = [];
 let wheelAngle = 0;
 let wheelAngleTarget = 0;
-let wheelCamZ = WHEEL_CAM_Z_DEFAULT;
-let wheelCamZSmooth = WHEEL_CAM_Z_DEFAULT;
+let wheelCamZSmooth = WHEEL_CAM_Z_BOOK;
 let wheelBuildToken = 0;
-let wheelDrag = { active: false, x: 0, lastX: 0 };
-/** Press-and-hold: stack spinning blades into one layered image. */
+let wheelDrag = {
+  armed: false,
+  active: false,
+  x: 0,
+  y: 0,
+  lastX: 0,
+  lastY: 0,
+  pointerId: null,
+};
+let wheelHoldTimer = 0;
+/** Press-and-hold: stack into one layered collage. */
 let wheelCluster = { active: false, t: 0, pointerId: null };
+/** Book-page flick (scroll) through combine images. */
+let wheelPage = 0;
+let wheelPageTarget = 0;
+let wheelPageVel = 0;
+/** 0 = book pages (scroll), 1 = radial cross-section (drag). */
+let combineCrossTarget = 0;
+let combineCrossT = 0;
+/** Cursor in COMBINE — drives contrasting backdrop from sampled layer colour. */
+let combinePointer = { nx: 0.5, ny: 0.5, active: false };
+let combineBgSmooth = { r: 0.08, g: 0.08, b: 0.09 };
 let introActive = true;
 let overviewCenter = new THREE.Vector3();
 let overviewRadius = 400;
@@ -1798,6 +1833,10 @@ async function bakeThresholdLayerPlane(group, role) {
     mesh.userData.roleScale = 1;
     mesh.userData.aspect = gray.width / Math.max(gray.height, 1);
     mesh.userData.ownsMap = true;
+    mesh.userData.keyColor = gray.keyColor || group.userData.keyColor;
+    mesh.userData.avgColor = gray.avgColor || group.userData.avgColor;
+    mesh.userData.palette = gray.palette || null;
+    mesh.userData.sampleCanvas = layer.canvas;
     return mesh;
   } catch (err) {
     console.warn("Layer bake failed", url, role, err);
@@ -1916,6 +1955,26 @@ function leaveGalleryMode() {
   document.documentElement.classList.remove("is-gallery");
 }
 
+function sampleGalleryPointer(e) {
+  if (!els.viewport) return;
+  const rect = els.viewport.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+  galleryPointer.nx = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+  galleryPointer.ny = clamp((e.clientY - rect.top) / rect.height, 0, 1);
+}
+
+/** Cursor → threshold look: X brightens fills, Y hardens the cut. */
+function applyGalleryThresholdLook(mesh, bright, intensity) {
+  const mat = mesh?.material;
+  if (!mat) return;
+  mat.transparent = true;
+  mat.depthWrite = false;
+  mat.color.setRGB(bright, bright, bright);
+  // Softer cut when intensity is low; punchier silhouette when high
+  mat.opacity = lerp(0.38, 1, intensity);
+  mat.alphaTest = lerp(0.02, 0.48, intensity);
+}
+
 function updateGallery(clockSec = 0) {
   if (!camera || !galleryRoot || !galleryPlanes.length) return;
   galleryRoot.visible = true;
@@ -1935,12 +1994,22 @@ function updateGallery(clockSec = 0) {
   camera.position.lerp(_camPos, 0.16);
   camera.lookAt(_look);
 
+  // Left→right: dimmer→brighter fills. Top→bottom: hard→soft threshold.
+  const targetBright = lerp(0.5, 1.55, galleryPointer.nx);
+  const targetIntensity = lerp(0.88, 0.18, galleryPointer.ny);
+  galleryThreshold.bright += (targetBright - galleryThreshold.bright) * 0.14;
+  galleryThreshold.intensity +=
+    (targetIntensity - galleryThreshold.intensity) * 0.14;
+
   if (scene?.background) scene.background.setRGB(0.08, 0.08, 0.09);
   if (scene?.fog) {
     scene.fog.color.setRGB(0.08, 0.08, 0.09);
     scene.fog.near = Math.max(8, galleryCamZSmooth * 0.2);
     scene.fog.far = Math.max(60, galleryCamZSmooth * 2.4);
   }
+
+  const cursorNdcX = galleryPointer.nx * 2 - 1;
+  const cursorNdcY = -(galleryPointer.ny * 2 - 1);
 
   let activeItem = null;
   let best = Infinity;
@@ -1951,7 +2020,6 @@ function updateGallery(clockSec = 0) {
     mesh.lookAt(camera.position);
     const aspect = mesh.userData.aspect || 1;
     mesh.scale.set(GALLERY_CARD * aspect, GALLERY_CARD, 1);
-    if (mesh.material) mesh.material.opacity = 1;
 
     mesh.getWorldPosition(_tmp);
     const d = camera.position.distanceToSquared(_tmp);
@@ -1959,6 +2027,18 @@ function updateGallery(clockSec = 0) {
       best = d;
       activeItem = mesh.userData.item;
     }
+
+    // Layers under the cursor get a stronger threshold punch
+    _tmp.project(camera);
+    const prox = Math.exp(
+      -((_tmp.x - cursorNdcX) ** 2 + (_tmp.y - cursorNdcY) ** 2) /
+        (2 * 0.4 * 0.4)
+    );
+    const bright =
+      galleryThreshold.bright * lerp(0.84, 1.28, prox);
+    const intensity =
+      galleryThreshold.intensity * lerp(0.72, 1.2, prox);
+    applyGalleryThresholdLook(mesh, bright, clamp(intensity, 0, 1));
   }
 
   const progress =
@@ -1984,8 +2064,7 @@ async function ensureWheelBuilt({ force = false } = {}) {
 
   wheelRoot = new THREE.Group();
   wheelRoot.visible = false;
-  // Tip so the upright radial cards read in depth
-  wheelRoot.rotation.x = WHEEL_TIP;
+  wheelRoot.rotation.x = 0;
 
   wheelPivot = new THREE.Group();
   wheelRoot.add(wheelPivot);
@@ -1996,14 +2075,10 @@ async function ensureWheelBuilt({ force = false } = {}) {
     const mesh = await bakeOneLayerForMarker(picks[i]);
     if (!mesh) continue;
     const angle = (i / Math.max(n, 1)) * Math.PI * 2;
-    // Hub at each image's centre — upright blades, radial through the origin
     mesh.position.set(0, 0, 0);
-    _wheelRadial.set(Math.cos(angle), Math.sin(angle), 0);
-    _wheelTangent.crossVectors(_wheelRadial, _wheelUp).normalize();
-    _wheelBasis.makeBasis(_wheelRadial, _wheelUp, _wheelTangent);
-    mesh.quaternion.setFromRotationMatrix(_wheelBasis);
+    mesh.quaternion.identity();
     const aspect = mesh.userData.aspect || 1;
-    mesh.scale.set(WHEEL_CARD * aspect, WHEEL_CARD, 1);
+    mesh.scale.set(BOOK_PAGE_SIZE * aspect, BOOK_PAGE_SIZE, 1);
     mesh.userData.wheelAngle = angle;
     mesh.userData.wheelIndex = wheelPlanes.length;
     wheelPivot.add(mesh);
@@ -2023,7 +2098,7 @@ async function enterWheelMode() {
   if (trackMesh) trackMesh.visible = false;
 
   if (els.scrollHint) {
-    els.scrollHint.textContent = "BUILDING POSTCARDS…";
+    els.scrollHint.textContent = "COMBINING…";
     els.scrollHint.classList.remove("is-gone");
     hintHidden = false;
   }
@@ -2042,9 +2117,23 @@ async function enterWheelMode() {
 
   wheelAngle = 0;
   wheelAngleTarget = 0;
-  wheelCamZ = WHEEL_CAM_Z_DEFAULT;
-  wheelCamZSmooth = WHEEL_CAM_Z_DEFAULT;
+  wheelCamZSmooth = WHEEL_CAM_Z_BOOK;
+  wheelPage = 0;
+  wheelPageTarget = 0;
+  wheelPageVel = 0;
+  // Land in the drag cross-section; scroll/hold open the other interactions
+  combineCrossTarget = 1;
+  combineCrossT = 1;
+  wheelCamZSmooth = WHEEL_CAM_Z_CROSS;
+  combinePointer.nx = 0.5;
+  combinePointer.ny = 0.5;
+  combinePointer.active = false;
+  combineBgSmooth = { r: 0.08, g: 0.08, b: 0.09 };
+  applyCombineAtmosphere(combineBgSmooth);
+  clearWheelHoldTimer();
+  wheelDrag.armed = false;
   wheelDrag.active = false;
+  wheelDrag.pointerId = null;
   wheelCluster.active = false;
   wheelCluster.t = 0;
   wheelCluster.pointerId = null;
@@ -2052,85 +2141,245 @@ async function enterWheelMode() {
 
   if (els.scrollHint) {
     els.scrollHint.textContent = wheelPlanes.length
-      ? "HOLD TO COMBINE · SCROLL TO ZOOM"
+      ? "DRAG TO SPIN · SCROLL FOR PAGES · HOLD TO COMBINE"
       : "NO LAYERS FOUND";
     els.scrollHint.classList.remove("is-gone");
     hintHidden = false;
   }
   if (els.viewport) {
-    els.viewport.setAttribute("aria-label", "Spinning postcards");
+    els.viewport.setAttribute(
+      "aria-label",
+      "Combine: drag cross-section, scroll pages, hold to collage"
+    );
   }
 }
 
 function leaveWheelMode() {
   wheelBuildToken += 1;
+  clearWheelHoldTimer();
+  wheelDrag.armed = false;
   wheelDrag.active = false;
+  wheelDrag.pointerId = null;
   wheelCluster.active = false;
   wheelCluster.t = 0;
   wheelCluster.pointerId = null;
+  wheelPageVel = 0;
+  combineCrossTarget = 0;
+  combineCrossT = 0;
+  combinePointer.active = false;
+  clearCombineAtmosphere();
   document.documentElement.classList.remove("is-wheel-clustering");
   if (wheelRoot) wheelRoot.visible = false;
   document.documentElement.classList.remove("is-wheeling");
+}
+
+function clearWheelHoldTimer() {
+  if (wheelHoldTimer) {
+    clearTimeout(wheelHoldTimer);
+    wheelHoldTimer = 0;
+  }
 }
 
 function wheelClusterCamZ() {
   return clamp(WHEEL_STACK_SIZE * 2.35, WHEEL_CAM_Z_NEAR, WHEEL_CAM_Z_FAR);
 }
 
+function contrastingBackdropFromRgb(rgb) {
+  const src = rgb || { r: 140, g: 140, b: 140 };
+  // Invert like inspect, then bias lightness so cutouts stay readable
+  let { h, s, l } = rgbToHsl(
+    255 - clamp(src.r, 0, 255),
+    255 - clamp(src.g, 0, 255),
+    255 - clamp(src.b, 0, 255)
+  );
+  s = clamp(s * 0.9 + 0.08, 0.12, 0.78);
+  l = clamp(l > 0.5 ? l * 0.92 : l * 1.08 + 0.04, 0.08, 0.9);
+  const out = hslToRgb(h, s, l);
+  return { r: out.r / 255, g: out.g / 255, b: out.b / 255 };
+}
+
+function sampleCanvasPixel(canvas, uvx, uvy) {
+  if (!canvas?.getContext) return null;
+  const w = canvas.width;
+  const h = canvas.height;
+  if (!w || !h) return null;
+  const x = clamp(Math.floor(uvx * (w - 1)), 0, w - 1);
+  const y = clamp(Math.floor((1 - uvy) * (h - 1)), 0, h - 1);
+  try {
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const p = ctx.getImageData(x, y, 1, 1).data;
+    return { r: p[0], g: p[1], b: p[2], a: p[3] };
+  } catch {
+    return null;
+  }
+}
+
+function fallbackCombineSampleColor(mesh) {
+  const role = mesh?.userData?.depthRole || "mid";
+  const palette = mesh?.userData?.palette;
+  if (palette?.[role]) return palette[role];
+  if (palette?.background) return palette.background;
+  return (
+    mesh?.userData?.avgColor ||
+    mesh?.userData?.keyColor ||
+    { r: 120, g: 120, b: 120 }
+  );
+}
+
+/** Colour under the cursor through cutouts; hollows fall through to deeper planes. */
+function sampleCombinePointerColor() {
+  if (!camera || !wheelPlanes.length || !els.viewport) return null;
+  inspectPointer.x = combinePointer.nx * 2 - 1;
+  inspectPointer.y = -(combinePointer.ny * 2 - 1);
+  inspectRaycaster.setFromCamera(inspectPointer, camera);
+  const hits = inspectRaycaster.intersectObjects(
+    wheelPlanes.filter((m) => m.visible),
+    false
+  );
+  for (const hit of hits) {
+    const mesh = hit.object;
+    const uv = hit.uv;
+    if (uv && mesh.userData.sampleCanvas) {
+      const px = sampleCanvasPixel(mesh.userData.sampleCanvas, uv.x, uv.y);
+      if (px && px.a >= 28) {
+        return { r: px.r, g: px.g, b: px.b };
+      }
+      // Transparent hollow — keep falling through deeper layers
+      continue;
+    }
+    return fallbackCombineSampleColor(mesh);
+  }
+  return null;
+}
+
+function applyCombineAtmosphere(rgb01) {
+  const r = rgb01?.r ?? 0.08;
+  const g = rgb01?.g ?? 0.08;
+  const b = rgb01?.b ?? 0.09;
+  if (scene?.background) scene.background.setRGB(r, g, b);
+  if (scene?.fog) scene.fog.color.setRGB(r, g, b);
+  const css = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+  document.documentElement.style.setProperty("--combine-bg", css);
+  const luma = r * 0.299 + g * 0.587 + b * 0.114;
+  document.documentElement.style.setProperty(
+    "--combine-ink",
+    luma > 0.55 ? "#111111" : "#f0f0f0"
+  );
+}
+
+function clearCombineAtmosphere() {
+  document.documentElement.style.removeProperty("--combine-bg");
+  document.documentElement.style.removeProperty("--combine-ink");
+  combineBgSmooth = { r: 0.08, g: 0.08, b: 0.09 };
+}
+
+function sampleCombinePointer(e) {
+  if (!els.viewport) return;
+  const rect = els.viewport.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+  combinePointer.nx = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+  combinePointer.ny = clamp((e.clientY - rect.top) / rect.height, 0, 1);
+  combinePointer.active = true;
+}
+
 function updateWheel(clockSec = 0) {
   if (!camera || !wheelPivot || !wheelPlanes.length) return;
   if (wheelRoot) wheelRoot.visible = true;
 
+  const nStack = Math.max(wheelPlanes.length, 1);
+  const maxPage = Math.max(nStack - 1, 0);
   const clusterTarget = wheelCluster.active ? 1 : 0;
-  wheelCluster.t += (clusterTarget - wheelCluster.t) * 0.18;
+  // Slightly slower gather so the carousel → collage snap reads
+  wheelCluster.t += (clusterTarget - wheelCluster.t) * 0.14;
   const ct = smoothstep(0, 1, wheelCluster.t);
 
-  // Idle spin only while the blades are free
-  if (!wheelCluster.active && ct < 0.08 && !wheelDrag.active) {
+  // Scroll → book pages; drag → radial cross-section
+  combineCrossT += (combineCrossTarget - combineCrossT) * 0.14;
+  const xt = smoothstep(0, 1, combineCrossT) * (1 - ct);
+
+  // Momentum page-flick (book via scroll), then soft-snap onto whole pages
+  if (!wheelCluster.active && xt < 0.55) {
+    wheelPageTarget = clamp(wheelPageTarget + wheelPageVel, 0, maxPage);
+    wheelPageVel *= 0.86;
+    if (Math.abs(wheelPageVel) < 0.018) {
+      wheelPageVel = 0;
+      wheelPageTarget += (Math.round(wheelPageTarget) - wheelPageTarget) * 0.22;
+    }
+  } else {
+    wheelPageVel *= 0.7;
+  }
+  wheelPage += (wheelPageTarget - wheelPage) * 0.2;
+  const page = clamp(wheelPage, 0, maxPage);
+
+  // Cross-section idle spin while free (drag mode)
+  if (
+    !wheelCluster.active &&
+    !wheelDrag.active &&
+    xt > 0.55 &&
+    combineCrossTarget > 0.5
+  ) {
     wheelAngleTarget += WHEEL_IDLE_SPIN * (1 / 60);
   }
   if (!wheelCluster.active) {
     wheelAngle += (wheelAngleTarget - wheelAngle) * 0.12;
   }
-  // Freeze spin as the mosaic forms
-  wheelPivot.rotation.z = wheelAngle * (1 - ct);
-  wheelRoot.rotation.x = lerp(WHEEL_TIP, 0, ct);
 
-  wheelCamZSmooth += (wheelCamZ - wheelCamZSmooth) * 0.12;
-  const spinCamY = 1.2 + (wheelCamZSmooth - WHEEL_CAM_Z_NEAR) * 0.012;
+  wheelPivot.rotation.z = wheelAngle * xt;
+  wheelRoot.rotation.x = WHEEL_TIP * xt;
+
+  const bookCamZ = WHEEL_CAM_Z_BOOK;
+  const crossCamZ = WHEEL_CAM_Z_CROSS;
+  const browseCamZ = lerp(bookCamZ, crossCamZ, xt);
+  // Sit a little above the spindle so the hinged edges read clearly
+  const browseCamY = lerp(BOOK_PAGE_SIZE * 0.35, 1.15, xt);
+  wheelCamZSmooth += (browseCamZ - wheelCamZSmooth) * 0.14;
   const mosaicZ = wheelClusterCamZ();
   const camZ = lerp(wheelCamZSmooth, mosaicZ, ct);
-  const camY = lerp(spinCamY, 0, ct);
+  const camY = lerp(browseCamY, 0, ct);
   _camPos.set(0, camY, camZ);
-  _look.set(0, 0, 0);
-  camera.position.lerp(_camPos, 0.18);
+  _look.set(0, lerp(BOOK_PAGE_SIZE * 0.35, 0, xt), 0);
+  _look.lerp(_tmp.set(0, 0, 0), ct);
+  camera.position.lerp(_camPos, 0.2);
   camera.lookAt(_look);
 
-  if (scene?.background) scene.background.setRGB(0.08, 0.08, 0.09);
-  if (scene?.fog) {
-    scene.fog.color.setRGB(0.08, 0.08, 0.09);
-    scene.fog.near = Math.max(4, camZ * 0.22);
-    scene.fog.far = Math.max(48, camZ * 2.1);
-  }
-
-  const nStack = Math.max(wheelPlanes.length, 1);
   let activeItem = null;
-  let best = -Infinity;
+  let bestScore = -Infinity;
   for (const mesh of wheelPlanes) {
-    const angle = mesh.userData.wheelAngle;
     const aspect = mesh.userData.aspect || 1;
-    const stackIdx =
-      mesh.userData.stackOrder ?? mesh.userData.wheelIndex ?? 0;
+    const idx = mesh.userData.wheelIndex ?? 0;
+    const stackIdx = mesh.userData.stackOrder ?? idx;
+    const angle = mesh.userData.wheelAngle ?? 0;
+    const t = idx - page; // book page offset
 
-    // Spin pose — radial upright blade through the hub
-    _wheelPosA.set(0, 0, 0);
+    const pageW =
+      aspect >= 1 ? BOOK_PAGE_SIZE * aspect : BOOK_PAGE_SIZE * aspect;
+    const pageH =
+      aspect >= 1 ? BOOK_PAGE_SIZE : BOOK_PAGE_SIZE / Math.max(aspect, 1e-6);
+
+    // —— Rolodex pose (scroll): every card hinged on a shared bottom edge ——
+    const absT = Math.abs(t);
+    const pitch = clamp(t, -ROLODEX_VISIBLE, ROLODEX_VISIBLE) * ROLODEX_STEP;
+    // Spindle at origin; card extends upward and swings around +X
+    const hingeY = (pageH / 2) * Math.cos(pitch);
+    const hingeZ = (pageH / 2) * Math.sin(pitch);
+    let bookOpacity = 1;
+    if (absT > ROLODEX_VISIBLE) bookOpacity = 0;
+    else bookOpacity = lerp(1, 0.28, clamp(absT / ROLODEX_VISIBLE, 0, 1));
+
+    // Keep the bottom edge on the shared spindle at the origin
+    _wheelPosA.set(0, hingeY, hingeZ);
+    _wheelQuatA.setFromAxisAngle(_tmp.set(1, 0, 0), pitch);
+    _wheelScaleA.set(pageW, pageH, 1);
+
+    // —— Cross-section pose (drag) ——
+    _wheelPosC.set(0, 0, 0);
     _wheelRadial.set(Math.cos(angle), Math.sin(angle), 0);
     _wheelTangent.crossVectors(_wheelRadial, _wheelUp).normalize();
     _wheelBasis.makeBasis(_wheelRadial, _wheelUp, _wheelTangent);
-    _wheelQuatA.setFromRotationMatrix(_wheelBasis);
-    _wheelScaleA.set(WHEEL_CARD * aspect, WHEEL_CARD, 1);
+    _wheelQuatC.setFromRotationMatrix(_wheelBasis);
+    _wheelScaleC.set(WHEEL_CARD * aspect, WHEEL_CARD, 1);
 
-    // Hold pose — every silhouette shares one frame, stacked as one image
+    // —— Hold collage ——
     _wheelPosB.set(0, 0, (stackIdx - (nStack - 1) / 2) * WHEEL_STACK_Z);
     _wheelQuatB.identity();
     const stack =
@@ -2139,28 +2388,74 @@ function updateWheel(clockSec = 0) {
         : { w: WHEEL_STACK_SIZE * aspect, h: WHEEL_STACK_SIZE };
     _wheelScaleB.set(stack.w, stack.h, 1);
 
-    mesh.position.lerpVectors(_wheelPosA, _wheelPosB, ct);
-    mesh.quaternion.slerpQuaternions(_wheelQuatA, _wheelQuatB, ct);
-    mesh.scale.lerpVectors(_wheelScaleA, _wheelScaleB, ct);
-    mesh.renderOrder = ct > 0.02 ? stackIdx : 0;
+    // book → cross-section → collage
+    mesh.position.lerpVectors(_wheelPosA, _wheelPosC, xt).lerp(_wheelPosB, ct);
+    mesh.quaternion.copy(_wheelQuatA).slerp(_wheelQuatC, xt).slerp(_wheelQuatB, ct);
+    mesh.scale.lerpVectors(_wheelScaleA, _wheelScaleC, xt).lerp(_wheelScaleB, ct);
 
-    // Shared alpha so transparent cutouts blend into one composite
+    const bookVisible = absT <= ROLODEX_VISIBLE + 0.25 && bookOpacity > 0.04;
+    mesh.visible = ct > 0.02 || xt > 0.2 || bookVisible;
+    // Nearer-to-upright cards draw later so they sit in front of the fan
+    mesh.renderOrder =
+      ct > 0.02
+        ? stackIdx
+        : xt > 0.5
+          ? idx
+          : Math.round(50 - absT * 6);
+
     if (mesh.material) {
-      mesh.material.opacity = lerp(1, 0.78, ct);
+      const crossOpacity = 1;
+      mesh.material.opacity = lerp(
+        lerp(bookOpacity, crossOpacity, xt),
+        0.78,
+        ct
+      );
       mesh.material.transparent = true;
       mesh.material.depthWrite = false;
+      mesh.material.alphaTest = 0;
+      mesh.material.side = THREE.DoubleSide;
     }
 
-    const worldAngle = angle + wheelAngle;
-    const facing = -Math.cos(worldAngle);
-    if (facing > best) {
-      best = facing;
+    // Prefer the page / blade most in front for captions + fallback colour
+    let score;
+    if (xt > 0.45) {
+      const worldAngle = angle + wheelAngle;
+      score = -Math.cos(worldAngle);
+    } else {
+      score = 2 - Math.abs(t);
+    }
+    if (score > bestScore) {
+      bestScore = score;
       activeItem = mesh.userData.item;
     }
   }
 
+  // Backdrop = contrasting colour under the cursor (through hollow cutouts)
+  const sampled = sampleCombinePointerColor();
+  let targetBg = { r: 0.08, g: 0.08, b: 0.09 };
+  if (sampled) {
+    targetBg = contrastingBackdropFromRgb(sampled);
+  } else if (activeItem) {
+    const mesh =
+      wheelPlanes.find((m) => m.userData.item === activeItem) || null;
+    targetBg = contrastingBackdropFromRgb(fallbackCombineSampleColor(mesh));
+  }
+  combineBgSmooth.r += (targetBg.r - combineBgSmooth.r) * 0.14;
+  combineBgSmooth.g += (targetBg.g - combineBgSmooth.g) * 0.14;
+  combineBgSmooth.b += (targetBg.b - combineBgSmooth.b) * 0.14;
+  applyCombineAtmosphere(combineBgSmooth);
+
+  if (scene?.fog) {
+    scene.fog.near = Math.max(4, camZ * 0.2);
+    scene.fog.far = Math.max(40, camZ * 1.8);
+  }
+
   const progress =
-    activeItem?.ts != null ? timeNormTs(activeItem.ts) : smoothProgress;
+    activeItem?.ts != null
+      ? timeNormTs(activeItem.ts)
+      : maxPage > 0
+        ? page / maxPage
+        : smoothProgress;
   updateCornerMeta(clamp(progress, 0, 1), activeItem);
   setBrandWeightFromCloseness(0.5, captionForItem(activeItem));
 }
@@ -2222,17 +2517,56 @@ function leaveTunnelMode() {
   document.documentElement.classList.remove("is-tunneling");
 }
 
-async function enterElevationMode() {
+function applyExperienceFlags() {
+  if (experienceView === "combine") {
+    viewMode = "wheel";
+    hikeArrangement = "path";
+  } else if (experienceView === "zoom") {
+    viewMode = "elevation";
+    hikeArrangement = "gallery";
+  } else {
+    viewMode = "elevation";
+    hikeArrangement = "path";
+  }
+  els.experience?.setAttribute("data-view", experienceView);
+  els.experience?.setAttribute("data-mode", viewMode);
+  els.experience?.setAttribute(
+    "data-hike",
+    experienceView === "combine" ? "" : hikeArrangement
+  );
+}
+
+function updateViewTabs() {
+  const tabs = els.viewTabs?.querySelectorAll("[data-view]");
+  if (!tabs?.length) return;
+  for (const btn of tabs) {
+    const active = btn.getAttribute("data-view") === experienceView;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+}
+
+function leavePathWorld() {
+  introActive = false;
+  endInspect();
+  document.documentElement.style.overflow = "hidden";
+  setHikeWorldVisible(false);
+  if (trackMesh) trackMesh.visible = false;
+}
+
+async function enterHikeGallery() {
   const buildToken = ++galleryBuildToken;
   document.documentElement.style.overflow = "hidden";
   leaveWheelMode();
+  endInspect();
+  introActive = false;
   if (selfieGroup) selfieGroup.visible = false;
   setSelfieCardsVisible(false);
   setHikeWorldVisible(false);
   if (trackMesh) trackMesh.visible = false;
 
   if (els.scrollHint) {
-    els.scrollHint.textContent = "BUILDING GALLERY…";
+    els.scrollHint.textContent = "ZOOMING OUT…";
     els.scrollHint.classList.remove("is-gone");
     hintHidden = false;
   }
@@ -2249,6 +2583,10 @@ async function enterElevationMode() {
   galleryCamZ = GALLERY_CAM_Z_DEFAULT;
   galleryCamZSmooth = GALLERY_CAM_Z_DEFAULT;
   galleryDrag.active = false;
+  galleryPointer.nx = 0.5;
+  galleryPointer.ny = 0.5;
+  galleryThreshold.bright = 1;
+  galleryThreshold.intensity = 0.55;
 
   if (scene?.fog) {
     scene.fog.near = 20;
@@ -2259,75 +2597,77 @@ async function enterElevationMode() {
 
   if (els.scrollHint) {
     els.scrollHint.textContent = galleryPlanes.length
-      ? "DRAG TO EXPLORE · SCROLL TO ZOOM"
+      ? "MOVE TO SHIFT THRESHOLD · DRAG TO ORBIT"
       : "NO LAYERS FOUND";
     els.scrollHint.classList.remove("is-gone");
     hintHidden = false;
   }
   if (els.viewport) {
-    els.viewport.setAttribute("aria-label", "Exploded image gallery");
+    els.viewport.setAttribute("aria-label", "Zoomed-out image gallery");
   }
 }
 
-function updateModeToggle() {
-  if (!els.modeToggle) return;
-  const labels = {
-    elevation: "THE HIKE",
-    wheel: "POSTCARDS",
-  };
-  const next = VIEW_MODES[(VIEW_MODES.indexOf(viewMode) + 1) % VIEW_MODES.length];
-  els.modeToggle.textContent = labels[viewMode] || "THE HIKE";
-  els.modeToggle.setAttribute(
-    "aria-pressed",
-    viewMode === "elevation" ? "false" : "true"
-  );
-  els.modeToggle.setAttribute(
-    "aria-label",
-    `Current view ${labels[viewMode] || "THE HIKE"}. Click for ${labels[next]}`
-  );
+function enterHikePath() {
+  leaveGalleryMode();
+  leaveWheelMode();
+  endInspect();
+  if (selfieGroup) selfieGroup.visible = false;
+  setSelfieCardsVisible(false);
+
+  document.documentElement.style.overflow = "";
+  document.documentElement.classList.remove("is-gallery");
+
+  restoreHikeLayout();
+  setHikeWorldVisible(true);
+  beginAtTimelineStart();
+
+  if (els.viewport) {
+    els.viewport.setAttribute("aria-label", "Hike along the Wikiloc path");
+  }
 }
 
-async function setViewMode(mode) {
-  if (!VIEW_MODES.includes(mode) || mode === viewMode) return;
+async function setExperienceView(next) {
+  if (!EXPERIENCE_VIEWS.includes(next) || next === experienceView) return;
   if (introActive) endIntro({ keepHint: true });
   endInspect();
   endWheelCluster();
 
-  if (viewMode === "elevation") leaveGalleryMode();
-  if (viewMode === "wheel") leaveWheelMode();
+  const prev = experienceView;
+  if (prev === "combine") leaveWheelMode();
+  if (prev === "zoom") {
+    leaveGalleryMode();
+    galleryDrag.active = false;
+  }
+  if (prev === "path") leavePathWorld();
 
-  viewMode = mode;
-  els.experience?.setAttribute("data-mode", mode);
+  experienceView = next;
+  applyExperienceFlags();
   if (selfieGroup) selfieGroup.visible = false;
 
   try {
-    if (mode === "wheel") await enterWheelMode();
-    else await enterElevationMode();
+    if (next === "combine") await enterWheelMode();
+    else if (next === "zoom") await enterHikeGallery();
+    else enterHikePath();
   } catch (err) {
-    console.error("View mode switch failed", mode, err);
-    if (mode === "wheel") {
+    console.error("Experience view switch failed", next, err);
+    if (next === "combine") {
       leaveWheelMode();
       if (els.scrollHint) {
-        els.scrollHint.textContent = "POSTCARDS FAILED TO LOAD";
+        els.scrollHint.textContent = "COMBINE FAILED TO LOAD";
         els.scrollHint.classList.remove("is-gone");
         hintHidden = false;
       }
-    } else {
+    } else if (next === "zoom") {
       leaveGalleryMode();
       if (els.scrollHint) {
-        els.scrollHint.textContent = "GALLERY FAILED TO LOAD";
+        els.scrollHint.textContent = "ZOOM OUT FAILED TO LOAD";
         els.scrollHint.classList.remove("is-gone");
         hintHidden = false;
       }
     }
   }
 
-  updateModeToggle();
-}
-
-function toggleViewMode() {
-  const next = VIEW_MODES[(VIEW_MODES.indexOf(viewMode) + 1) % VIEW_MODES.length];
-  void setViewMode(next);
+  updateViewTabs();
 }
 
 function activeInspectMarkers() {
@@ -2569,10 +2909,13 @@ function shuffleWheelStackOrder() {
 }
 
 function beginWheelCluster(pointerId = null) {
-  if (viewMode !== "wheel" || !wheelPlanes.length) return;
+  if (experienceView !== "combine" || !wheelPlanes.length) return;
+  if (wheelDrag.active) return;
+  clearWheelHoldTimer();
   shuffleWheelStackOrder();
   wheelCluster.active = true;
   wheelCluster.pointerId = pointerId;
+  wheelDrag.armed = false;
   wheelDrag.active = false;
   document.documentElement.classList.add("is-wheel-clustering");
   if (!hintHidden) hideHint();
@@ -2593,24 +2936,71 @@ function endWheelCluster(pointerId = null) {
 }
 
 function onWheelPointerDown(e) {
-  if (viewMode !== "wheel" || (e.button != null && e.button !== 0)) return;
+  if (experienceView !== "combine" || (e.button != null && e.button !== 0)) {
+    return;
+  }
   e.preventDefault();
+  sampleCombinePointer(e);
+  clearWheelHoldTimer();
+  wheelDrag.armed = true;
+  wheelDrag.active = false;
+  wheelDrag.pointerId = e.pointerId;
+  wheelDrag.x = e.clientX;
+  wheelDrag.y = e.clientY;
+  wheelDrag.lastX = e.clientX;
+  wheelDrag.lastY = e.clientY;
   try {
     els.viewport?.setPointerCapture?.(e.pointerId);
   } catch {
     /* ignore */
   }
-  beginWheelCluster(e.pointerId);
+  // Still press → collage; moving first → cross-section drag
+  wheelHoldTimer = setTimeout(() => {
+    wheelHoldTimer = 0;
+    if (wheelDrag.armed && !wheelDrag.active && !wheelCluster.active) {
+      beginWheelCluster(e.pointerId);
+    }
+  }, WHEEL_HOLD_MS);
 }
 
 function onWheelPointerMove(e) {
-  // Reserved — hold clusters; spin is idle-only while free
-  void e;
+  if (experienceView !== "combine") return;
+  sampleCombinePointer(e);
+  if (!wheelDrag.armed || wheelCluster.active) return;
+
+  const dxFromStart = e.clientX - wheelDrag.x;
+  const dyFromStart = e.clientY - wheelDrag.y;
+  if (
+    !wheelDrag.active &&
+    Math.hypot(dxFromStart, dyFromStart) >= WHEEL_DRAG_PX
+  ) {
+    clearWheelHoldTimer();
+    wheelDrag.active = true;
+    combineCrossTarget = 1; // drag opens the radial cross-section
+    if (!hintHidden) hideHint();
+    ensureAudioCtx();
+  }
+
+  if (!wheelDrag.active) return;
+  const dx = e.clientX - wheelDrag.lastX;
+  wheelDrag.lastX = e.clientX;
+  wheelDrag.lastY = e.clientY;
+  // Drag spins the radial cross-section around the hub
+  wheelAngleTarget += dx * 0.01;
 }
 
 function onWheelPointerUp(e) {
-  if (!wheelCluster.active && !wheelDrag.active) return;
+  if (
+    wheelDrag.pointerId != null &&
+    e.pointerId != null &&
+    e.pointerId !== wheelDrag.pointerId
+  ) {
+    return;
+  }
+  clearWheelHoldTimer();
+  wheelDrag.armed = false;
   wheelDrag.active = false;
+  wheelDrag.pointerId = null;
   try {
     els.viewport?.releasePointerCapture?.(e.pointerId);
   } catch {
@@ -2622,7 +3012,8 @@ function onWheelPointerUp(e) {
 function onInspectPointerDown(e) {
   if (e.button != null && e.button !== 0) return;
   if (inspectHold.active) return;
-  if (viewMode === "tunnel" || viewMode === "wheel") return;
+  if (viewMode === "wheel") return;
+  if (viewMode === "elevation" && hikeArrangement !== "path") return;
   const group = pickMarkerAt(e.clientX, e.clientY);
   if (!group) return;
   e.preventDefault();
@@ -2679,7 +3070,8 @@ function onTimelineWheel(e) {
 }
 
 function onGalleryPointerDown(e) {
-  if (viewMode !== "elevation" || (e.button != null && e.button !== 0)) return;
+  if (experienceView !== "zoom" || (e.button != null && e.button !== 0)) return;
+  sampleGalleryPointer(e);
   galleryDrag.active = true;
   galleryDrag.x = e.clientX;
   galleryDrag.y = e.clientY;
@@ -2695,7 +3087,9 @@ function onGalleryPointerDown(e) {
 }
 
 function onGalleryPointerMove(e) {
-  if (viewMode !== "elevation" || !galleryDrag.active) return;
+  if (experienceView !== "zoom") return;
+  sampleGalleryPointer(e);
+  if (!galleryDrag.active) return;
   const dx = e.clientX - galleryDrag.lastX;
   const dy = e.clientY - galleryDrag.lastY;
   galleryDrag.lastX = e.clientX;
@@ -2719,20 +3113,17 @@ function onViewportWheel(e) {
     e.preventDefault();
     return;
   }
-  if (viewMode === "wheel") {
+  if (viewMode === "wheel" || experienceView === "combine") {
     e.preventDefault();
     if (wheelCluster.active) return;
-    // Scroll up / pinch → closer to the hub
-    wheelCamZ = clamp(
-      wheelCamZ + e.deltaY * 0.045,
-      WHEEL_CAM_Z_NEAR,
-      WHEEL_CAM_Z_FAR
-    );
+    // Scroll opens book pages and flicks leaves
+    combineCrossTarget = 0;
+    wheelPageVel += clamp(e.deltaY * 0.0032, -1.1, 1.1);
     if (!hintHidden) hideHint();
     ensureAudioCtx();
     return;
   }
-  if (viewMode === "elevation") {
+  if (viewMode === "elevation" && hikeArrangement === "gallery") {
     e.preventDefault();
     galleryCamZ = clamp(
       galleryCamZ + e.deltaY * 0.05,
@@ -2741,6 +3132,11 @@ function onViewportWheel(e) {
     );
     if (!hintHidden) hideHint();
     ensureAudioCtx();
+    return;
+  }
+  if (viewMode === "elevation" && hikeArrangement === "path") {
+    e.preventDefault();
+    window.scrollBy(0, e.deltaY);
     return;
   }
   e.preventDefault();
@@ -3276,7 +3672,7 @@ function updateCornerMeta(progress, activeItem) {
 }
 
 function updateJourney(progress, clockSec = 0) {
-  if (viewMode !== "elevation") return;
+  if (viewMode !== "elevation" || hikeArrangement !== "path") return;
   if (!trackCurve || !camera) return;
   if (selfieGroup) selfieGroup.visible = false;
   if (inspectHold.active) {
@@ -3448,10 +3844,10 @@ async function buildWorld() {
   introActive = false;
   metaLabelsVisible = false;
   setAllMarkersVisualMode("layers");
-  viewMode = "elevation";
-  els.experience?.setAttribute("data-mode", "elevation");
-  await enterElevationMode();
-  updateModeToggle();
+  experienceView = "path";
+  applyExperienceFlags();
+  enterHikePath();
+  updateViewTabs();
 }
 
 function computeOverviewBounds() {
@@ -3567,6 +3963,32 @@ function animate() {
   const clockSec = performance.now() * 0.001;
   if (viewMode === "wheel") {
     updateWheel(clockSec);
+  } else if (viewMode === "elevation" && hikeArrangement === "path") {
+    if (inspectHold.active) {
+      if (introActive) updateOverview(clockSec);
+      else {
+        smoothProgress += (scrollProgress - smoothProgress) * 0.085;
+        const u = clamp(smoothProgress, 0, 0.999);
+        if (trackCurve) {
+          const pos = trackCurve.getPointAt(u);
+          const tangent = trackCurve.getTangentAt(u).normalize();
+          _side.crossVectors(tangent, _up);
+          if (_side.lengthSq() < 1e-6) _side.set(1, 0, 0);
+          else _side.normalize();
+          _camPos.copy(pos).addScaledVector(_side, 95).addScaledVector(_up, 55);
+          _look.copy(pos).addScaledVector(tangent, 90).addScaledVector(_up, 18);
+          camera.position.lerp(_camPos, 0.12);
+          camera.lookAt(_look);
+        }
+      }
+      updateInspectFrame();
+    } else if (introActive) {
+      updateOverview(clockSec);
+      updateJourneyLyric(0);
+    } else {
+      smoothProgress += (scrollProgress - smoothProgress) * 0.085;
+      updateJourney(smoothProgress, clockSec);
+    }
   } else if (viewMode === "elevation") {
     updateGallery(clockSec);
   }
@@ -3583,13 +4005,25 @@ function onResize() {
 }
 
 function onScroll() {
-  // Gallery + wheel own their own zoom / spin; page scroll is unused
+  if (viewMode !== "elevation" || hikeArrangement !== "path") return;
+  scrollProgress = readScrollProgress();
+  if (introActive && scrollProgress > 0.004) {
+    endIntro();
+  }
+  if (scrollProgress > 0.01) {
+    hideHint();
+    if (metaLabelsVisible) metaLabelsVisible = false;
+  }
+  ensureAudioCtx();
 }
 
-function bindModeControls() {
-  els.modeToggle?.addEventListener("click", () => {
+function bindViewControls() {
+  els.viewTabs?.addEventListener("click", (e) => {
+    const btn = e.target?.closest?.("[data-view]");
+    if (!btn || !els.viewTabs.contains(btn)) return;
+    const next = btn.getAttribute("data-view");
     ensureAudioCtx();
-    toggleViewMode();
+    void setExperienceView(next);
   });
   els.viewport?.addEventListener("pointermove", onGalleryPointerMove, {
     passive: true,
@@ -3599,8 +4033,11 @@ function bindModeControls() {
   });
   els.viewport?.addEventListener("wheel", onViewportWheel, { passive: false });
   els.viewport?.addEventListener("pointerdown", (e) => {
-    if (viewMode === "wheel") onWheelPointerDown(e);
-    else if (viewMode === "elevation") onGalleryPointerDown(e);
+    if (experienceView === "combine") {
+      sampleCombinePointer(e);
+      onWheelPointerDown(e);
+    } else if (experienceView === "path") onInspectPointerDown(e);
+    else if (experienceView === "zoom") onGalleryPointerDown(e);
   });
   window.addEventListener("pointerup", (e) => {
     onGalleryPointerUp(e);
@@ -3614,6 +4051,9 @@ function bindModeControls() {
   });
   window.addEventListener("blur", () => {
     onGalleryPointerUp({});
+    clearWheelHoldTimer();
+    wheelDrag.armed = false;
+    wheelDrag.active = false;
     endWheelCluster();
     endInspect();
   });
@@ -3644,7 +4084,7 @@ async function boot() {
   await loadBrandFonts();
   initScene();
   await buildWorld();
-  bindModeControls();
+  bindViewControls();
   animate();
   window.addEventListener("resize", onResize);
   window.addEventListener("scroll", onScroll, { passive: true });

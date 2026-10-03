@@ -15,27 +15,29 @@
     </script>
   </head>
   <body>
-    <div class="experience" data-mode="elevation">
+    <div class="experience" data-view="path" data-mode="elevation" data-hike="path">
       <h1 class="title-overlay" id="page-title">grateful chasing summits</h1>
 
-      <div id="viewport" class="viewport" aria-label="Exploded image gallery"></div>
+      <div id="viewport" class="viewport" aria-label="Hike along the Wikiloc path"></div>
 
       <div class="scroll-rail" id="scroll-rail" aria-hidden="true"></div>
 
       <p class="meta-chip meta-chip--top-left" id="meta-time" aria-live="polite">TIME</p>
       <p class="meta-chip meta-chip--top-right" id="meta-altitude" aria-live="polite">ELEVATION</p>
 
-      <button
-        type="button"
-        class="mode-toggle"
-        id="mode-toggle"
-        aria-pressed="false"
-        aria-label="Current view THE HIKE. Click for POSTCARDS"
-      >
-        THE HIKE
-      </button>
+      <nav class="view-tabs" id="view-tabs" aria-label="Experience views">
+        <button type="button" class="view-tab is-active" data-view="path" aria-pressed="true">
+          PATH
+        </button>
+        <button type="button" class="view-tab" data-view="zoom" aria-pressed="false">
+          ZOOM OUT
+        </button>
+        <button type="button" class="view-tab" data-view="combine" aria-pressed="false">
+          COMBINE
+        </button>
+      </nav>
 
-      <p class="scroll-hint" id="scroll-hint">DRAG TO EXPLORE · SCROLL TO ZOOM</p>
+      <p class="scroll-hint" id="scroll-hint">SCROLL TO BEGIN THE PASSAGE</p>
       <div class="journey-lyrics" id="journey-lyrics" aria-live="polite"></div>
 
       <p class="meta-chip meta-chip--bottom-left" id="meta-location" aria-live="polite">LAT LON</p>
