@@ -111,6 +111,11 @@ body {
   cursor: ew-resize;
 }
 
+.experience[data-mode="selfies"] .viewport {
+  pointer-events: auto;
+  cursor: grab;
+}
+
 .viewport canvas {
   display: block;
   width: 100%;
@@ -124,7 +129,8 @@ body {
   pointer-events: none;
 }
 
-.experience[data-mode="timeline"] .scroll-rail {
+.experience[data-mode="timeline"] .scroll-rail,
+.experience[data-mode="selfies"] .scroll-rail {
   height: 0;
 }
 
@@ -244,7 +250,8 @@ body {
   opacity: 1;
 }
 
-.experience[data-mode="timeline"] .journey-lyrics {
+.experience[data-mode="timeline"] .journey-lyrics,
+.experience[data-mode="selfies"] .journey-lyrics {
   opacity: 0;
 }
 
@@ -294,12 +301,14 @@ body {
   }
 }
 
-.experience[data-mode="timeline"] .scroll-hint {
+.experience[data-mode="timeline"] .scroll-hint,
+.experience[data-mode="selfies"] .scroll-hint {
   opacity: 1;
   transform: translateX(-50%);
 }
 
-.experience[data-mode="timeline"] .scroll-hint.is-gone {
+.experience[data-mode="timeline"] .scroll-hint.is-gone,
+.experience[data-mode="selfies"] .scroll-hint.is-gone {
   opacity: 0;
   transform: translateX(-50%) translateY(0.5rem);
 }
