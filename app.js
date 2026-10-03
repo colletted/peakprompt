@@ -102,11 +102,14 @@ let titleText = TITLE_FALLBACK;
 let captionsById = {};
 /** iPhone Screen Time day stats (from assets/hike-1/screentime). */
 let screentimeData = null;
-let lyricLines = [];
-let lastLyricKey = "";
-let smoothLyricProgress = 0;
+/** PATH thought thread after the intro — one line at a time along the trail. */
+let pathThoughts = [];
+let pathAltitudeThoughts = [];
+let lastThoughtKey = "";
+let pathThoughtIndex = -1;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
+let smoothThoughtProgress = 0;
 /** Staggered text-message intros when entering PATH / OUTLIERS / COMBINE. */
 let viewNarrativeToken = 0;
 let viewNarrativeActive = false;
@@ -114,24 +117,43 @@ let viewNarrativeTimers = [];
 const VIEW_NARRATIVES = {
   path: [
     "hello, fellow social climber",
-    "you've caught me mid-ascent — mid-pose, mid-caption",
-    "this is a visual recording of my first mountain hike",
-    "not the summit trophy shot — the whole sweaty theatre of getting there",
-    "scroll when you're ready. we'll climb it like we're being watched",
+    "first mountain hike. i kept taking pictures like postcards",
+    "not to send, really — just so i'd have something to hold later",
+    "this is that walk, one frame at a time",
   ],
   outliers: [
-    "cut. the trail was never the whole story",
-    "while the mountain loaded, the phone kept score",
-    "7h 51m. 362 pick-ups. frames that refused the GPS",
-    "these are the outliers — orbit what wouldn't stay on path",
+    "not everything stayed on the trail",
+    "my phone was counting the day in the background",
+    "7h 51m. 362 pick-ups. half of this i barely remember",
+    "these are the leftovers",
   ],
   combine: [
-    "and now everything talks over each other",
-    "path, pick-ups, peaks — shuffled into one restless deck",
-    "drag to slice the day. scroll to flick the leaves. hold to collapse",
-    "welcome to the combine — no single truth, just the mash",
+    "now i can't keep the piles separate",
+    "path, pick-ups, peaks — all of it at once",
+    "i'll flip through until something settles",
   ],
 };
+/** Fixed PATH thread after the intro — paced by scroll, not shuffled. */
+const PATH_THOUGHTS_FALLBACK = [
+  "i exist between two extremes",
+  "all in or nothing",
+  "in equal measure",
+  "falling short, standing tall",
+  "i am 5 apples tall and i have blind ambition",
+  "is this a good idea",
+  "do you own mountain gear?",
+  "why you wearing aw27 then",
+  "i usually struggle to climb flights of stairs… actually",
+  "sometimes it's a mountain that i feel emotionally attached to",
+  "because tomorrow marks a full year since i moved to london",
+  "and suddenly everything i knew was measured in distance",
+  "measured about how far i was from everyone i ever knew",
+  "and maybe turning 30 means everything exists at the edge",
+  "where my body and mind repair at different points",
+  "and maybe a girl who is 5 apples tall needs to climb a mountain",
+  "and maybe everything i ever wanted was on the other side of this one",
+];
+const PATH_ALTITUDE_THOUGHTS_FALLBACK = [];
 /** Single experience views: path journey, off-timeline outliers, combined wheel. */
 const EXPERIENCE_VIEWS = ["path", "outliers", "combine"];
 let experienceView = "path";
@@ -3657,77 +3679,65 @@ function hideHint() {
   els.scrollHint?.classList.add("is-gone");
 }
 
-function stripRtfControls(text) {
-  return String(text)
-    .replace(/\\'[0-9a-fA-F]{2}/g, "")
-    .replace(/\\[a-zA-Z]+-?\d* ?/g, "")
-    .replace(/[{}]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+function formatBubbleText(line) {
+  return String(line || "")
+    .trim()
+    .toLowerCase();
 }
 
-/** Parse lyrics from .rtf (quoted lines), .txt (one per line), or .json array. */
-function parseLyricSource(text, path) {
-  if (path.endsWith(".json")) {
-    try {
-      const raw = JSON.parse(text);
-      return Array.isArray(raw)
-        ? raw.map((line) => String(line).trim()).filter(Boolean)
-        : [];
-    } catch {
-      return [];
+function normalizeThoughtList(list, fallback) {
+  const lines = Array.isArray(list)
+    ? list.map((line) => formatBubbleText(line)).filter(Boolean)
+    : [];
+  return lines.length ? lines : fallback.map(formatBubbleText);
+}
+
+async function loadPathThoughts() {
+  try {
+    const res = await fetch("data/thoughts.json");
+    if (res.ok) {
+      const raw = await res.json();
+      // Support ["…"] or { general: [...], altitude: [...] }
+      if (Array.isArray(raw)) {
+        return {
+          general: normalizeThoughtList(raw, PATH_THOUGHTS_FALLBACK),
+          altitude: PATH_ALTITUDE_THOUGHTS_FALLBACK.map(formatBubbleText),
+        };
+      }
+      if (raw && typeof raw === "object") {
+        return {
+          general: normalizeThoughtList(raw.general, PATH_THOUGHTS_FALLBACK),
+          altitude: normalizeThoughtList(
+            raw.altitude,
+            PATH_ALTITUDE_THOUGHTS_FALLBACK
+          ),
+        };
+      }
     }
+  } catch {
+    /* use fallback */
   }
-
-  const quoted = [];
-  const re = /"([^"]*)"/g;
-  let match;
-  while ((match = re.exec(text))) {
-    const line = stripRtfControls(match[1]);
-    if (line) quoted.push(line);
-  }
-  if (quoted.length) return quoted;
-
-  return text
-    .split(/\r?\n/)
-    .map((line) => stripRtfControls(line))
-    .filter((line) => line && !line.startsWith("{\\rtf"));
+  return {
+    general: PATH_THOUGHTS_FALLBACK.map(formatBubbleText),
+    altitude: PATH_ALTITUDE_THOUGHTS_FALLBACK.map(formatBubbleText),
+  };
 }
 
-async function loadLyricLines() {
-  const candidates = [
-    "data/lyrics.rtf",
-    "data/lyrics.txt",
-    "data/lyrics.json",
-  ];
-  for (const path of candidates) {
-    try {
-      const res = await fetch(path);
-      if (!res.ok) continue;
-      const lines = parseLyricSource(await res.text(), path);
-      if (lines.length) return lines;
-    } catch {
-      // try next candidate
-    }
-  }
-  return [];
+function resetPathThoughtBag() {
+  pathThoughtIndex = -1;
+  smoothThoughtProgress = 0;
+  lastThoughtKey = "";
 }
 
-/** Slight opening linger, then pace the rest evenly to the end. */
-function lyricWindowAtProgress(progress, n) {
-  if (n <= 0) return { index: 0, localT: 0 };
-  if (n === 1) return { index: 0, localT: clamp(progress, 0, 1) };
+/** Map scroll progress → thought index (short open linger, then even pace). */
+function thoughtIndexAtProgress(progress, n) {
+  if (n <= 0) return 0;
+  if (n === 1) return 0;
   const p = clamp(progress, 0, 0.9999);
-  const firstHold = 0.1;
-  if (p < firstHold) {
-    return { index: 0, localT: firstHold > 0 ? p / firstHold : 1 };
-  }
-  const rest = (1 - firstHold) / (n - 1);
-  const u = p - firstHold;
-  const slot = clamp(Math.floor(u / Math.max(rest, 1e-6)), 0, n - 2);
-  const index = slot + 1;
-  const localT = clamp((u - slot * rest) / Math.max(rest, 1e-6), 0, 1);
-  return { index, localT };
+  const firstHold = 0.06;
+  if (p < firstHold) return 0;
+  const u = (p - firstHold) / (1 - firstHold);
+  return clamp(Math.floor(u * n), 0, n - 1);
 }
 
 function clearLyricBubbles() {
@@ -3735,7 +3745,7 @@ function clearLyricBubbles() {
   if (stack) stack.replaceChildren();
   lyricBubbleIndex = -1;
   lyricBubbleEl = null;
-  lastLyricKey = "";
+  lastThoughtKey = "";
 }
 
 function clearViewNarrativeTimers() {
@@ -3798,13 +3808,15 @@ async function playViewNarrative(view) {
     }
     const bubble = document.createElement("p");
     bubble.className = "journey-lyric-bubble";
-    bubble.textContent = lines[i];
+    const line = formatBubbleText(lines[i]);
+    bubble.textContent = line;
     stack.appendChild(bubble);
     requestAnimationFrame(() => bubble.classList.add("is-in"));
     lyricBubbleEl = bubble;
     lyricBubbleIndex = i;
     trimLyricBubbles(4);
-    const wait = i === lines.length - 1 ? 1600 : 1050 + Math.min(lines[i].length * 12, 700);
+    const wait =
+      i === lines.length - 1 ? 1600 : 1050 + Math.min(line.length * 12, 700);
     if (!(await narrativeDelay(wait, token))) return;
   }
 
@@ -3835,12 +3847,12 @@ function trimLyricBubbles(max = 3) {
   });
 }
 
-function ensureLyricBubble(index) {
+function ensureThoughtBubble(index) {
   const stack = els.journeyLyrics;
   if (!stack) return null;
   if (index === lyricBubbleIndex && lyricBubbleEl) return lyricBubbleEl;
 
-  // Scrolling backward: reset the thread so bubbles stay in order
+  // Scrolling back: rebuild the thread in order
   if (lyricBubbleIndex >= 0 && index < lyricBubbleIndex) {
     stack.replaceChildren();
     lyricBubbleEl = null;
@@ -3852,7 +3864,6 @@ function ensureLyricBubble(index) {
   const bubble = document.createElement("p");
   bubble.className = "journey-lyric-bubble";
   stack.appendChild(bubble);
-  // Pop-in on next frame
   requestAnimationFrame(() => bubble.classList.add("is-in"));
 
   lyricBubbleIndex = index;
@@ -3861,12 +3872,12 @@ function ensureLyricBubble(index) {
   return bubble;
 }
 
-/** Bottom-left chat bubbles; full lines pop in as you scroll. */
-function updateJourneyLyric(progress) {
+/** Fixed thought thread after the intro — advances with PATH scroll. */
+function updatePathThoughts(progress) {
   const stack = els.journeyLyrics;
   if (!stack) return;
 
-  // View intros own the bubble stack; PATH lyrics only on the trail
+  // View intros own the bubble stack; thoughts only on the trail
   if (
     viewNarrativeActive ||
     stack.classList.contains("is-view-intro") ||
@@ -3877,33 +3888,37 @@ function updateJourneyLyric(progress) {
 
   const show =
     viewMode === "elevation" &&
+    hikeArrangement === "path" &&
     !introActive &&
-    lyricLines.length > 0 &&
-    progress > 0.004;
+    pathThoughts.length > 0 &&
+    progress > 0.012;
 
   stack.classList.toggle("is-visible", show);
 
-  // Lag behind scroll so lines don't race past
   const target = clamp(progress, 0, 1);
-  const lag = target >= smoothLyricProgress ? 0.035 : 0.07;
-  smoothLyricProgress += (target - smoothLyricProgress) * lag;
+  const lag = target >= smoothThoughtProgress ? 0.04 : 0.08;
+  smoothThoughtProgress += (target - smoothThoughtProgress) * lag;
 
   if (!show) {
-    if (lastLyricKey !== "") clearLyricBubbles();
-    if (!introActive && progress <= 0.004) smoothLyricProgress = 0;
+    if (lastThoughtKey !== "") clearLyricBubbles();
+    if (!introActive && progress <= 0.012) {
+      smoothThoughtProgress = 0;
+      pathThoughtIndex = -1;
+    }
     return;
   }
 
-  const n = lyricLines.length;
-  const { index } = lyricWindowAtProgress(smoothLyricProgress, n);
-  const line = (lyricLines[index] || "").trim();
+  const n = pathThoughts.length;
+  const index = thoughtIndexAtProgress(smoothThoughtProgress, n);
+  const line = formatBubbleText(pathThoughts[index]);
   if (!line) return;
 
   const key = `${index}|${line}`;
-  if (key === lastLyricKey) return;
-  lastLyricKey = key;
+  if (key === lastThoughtKey) return;
+  lastThoughtKey = key;
+  pathThoughtIndex = index;
 
-  const bubble = ensureLyricBubble(index);
+  const bubble = ensureThoughtBubble(index);
   if (!bubble) return;
   bubble.classList.remove("is-typing");
   bubble.textContent = line;
@@ -4127,7 +4142,7 @@ function updateJourney(progress, clockSec = 0) {
 
   syncSoundPlayback(progress);
   applyJourneyAtmosphere(progress);
-  updateJourneyLyric(progress);
+  updatePathThoughts(progress);
 
   const targetClose = closeW > 0 ? closeSum / closeW : smoothCloseness;
   // Snappier follow so weight tracks the scroll, not a slow average
@@ -4297,8 +4312,8 @@ function beginAtTimelineStart() {
   window.scrollTo(0, 0);
   scrollProgress = 0;
   smoothProgress = 0;
-  smoothLyricProgress = 0;
   clearLyricBubbles();
+  resetPathThoughtBag();
   introActive = true;
   metaLabelsVisible = true;
   titleText = TITLE_FALLBACK;
@@ -4353,7 +4368,7 @@ function animate() {
       updateInspectFrame();
     } else if (introActive) {
       updateOverview(clockSec);
-      updateJourneyLyric(0);
+      updatePathThoughts(0);
     } else {
       smoothProgress += (scrollProgress - smoothProgress) * 0.085;
       updateJourney(smoothProgress, clockSec);
@@ -4455,7 +4470,10 @@ async function boot() {
     screentimeData = null;
   }
 
-  lyricLines = await loadLyricLines();
+  const thoughtPack = await loadPathThoughts();
+  pathThoughts = thoughtPack.general;
+  pathAltitudeThoughts = thoughtPack.altitude;
+  resetPathThoughtBag();
 
   await loadBrandFonts();
   initScene();

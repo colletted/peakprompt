@@ -373,6 +373,7 @@ html.is-inspecting .journey-lyric-bubble {
   letter-spacing: 0.03em;
   line-height: 1.35;
   text-align: left;
+  text-transform: lowercase;
   white-space: pre-wrap;
   opacity: 0;
   transform: translateY(0.45rem) scale(0.94);
