@@ -61,6 +61,7 @@
 html {
   margin: 0;
   background: #ffffff;
+  transition: background 0.2s ease;
 }
 
 body {
@@ -68,6 +69,13 @@ body {
   color: var(--ink);
   background: #ffffff;
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+html.is-inspecting,
+html.is-inspecting body {
+  background: var(--inspect-bg, #0c0c0c);
+  color: var(--inspect-ink, #f2f2f2);
 }
 
 .experience {
@@ -103,18 +111,18 @@ body {
   inset: 0;
   z-index: 1;
   background: transparent;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: default;
 }
 
 .experience[data-mode="timeline"] .viewport {
-  pointer-events: auto;
   cursor: ew-resize;
 }
 
-.experience[data-mode="selfies"] .viewport {
-  pointer-events: auto;
-  cursor: grab;
+.experience[data-inspect="true"] .viewport {
+  cursor: grabbing;
 }
+
 
 .viewport canvas {
   display: block;
@@ -129,8 +137,7 @@ body {
   pointer-events: none;
 }
 
-.experience[data-mode="timeline"] .scroll-rail,
-.experience[data-mode="selfies"] .scroll-rail {
+.experience[data-mode="timeline"] .scroll-rail {
   height: 0;
 }
 
@@ -162,6 +169,28 @@ body {
 
 .mode-toggle[aria-pressed="true"] {
   color: #111111;
+}
+
+html.is-inspecting .mode-toggle,
+html.is-inspecting .mode-toggle[aria-pressed="true"],
+html.is-inspecting .meta-chip {
+  color: var(--inspect-ink, #d8d8d8);
+}
+
+html.is-inspecting .mode-toggle:hover {
+  color: var(--inspect-ink, #ffffff);
+  opacity: 0.85;
+}
+
+html.is-inspecting .scroll-hint {
+  background: color-mix(in srgb, var(--inspect-bg, #0c0c0c) 88%, black);
+  border-color: color-mix(in srgb, var(--inspect-ink, #d8d8d8) 28%, transparent);
+  color: var(--inspect-ink, #d0d0d0);
+}
+
+html.is-inspecting .journey-lyric-bubble {
+  background: color-mix(in srgb, var(--inspect-bg, #0c0c0c) 70%, black);
+  color: var(--inspect-ink, #f0f0f0);
 }
 
 .scroll-hint {
@@ -250,8 +279,7 @@ body {
   opacity: 1;
 }
 
-.experience[data-mode="timeline"] .journey-lyrics,
-.experience[data-mode="selfies"] .journey-lyrics {
+.experience[data-mode="timeline"] .journey-lyrics {
   opacity: 0;
 }
 
@@ -301,14 +329,12 @@ body {
   }
 }
 
-.experience[data-mode="timeline"] .scroll-hint,
-.experience[data-mode="selfies"] .scroll-hint {
+.experience[data-mode="timeline"] .scroll-hint {
   opacity: 1;
   transform: translateX(-50%);
 }
 
-.experience[data-mode="timeline"] .scroll-hint.is-gone,
-.experience[data-mode="selfies"] .scroll-hint.is-gone {
+.experience[data-mode="timeline"] .scroll-hint.is-gone {
   opacity: 0;
   transform: translateX(-50%) translateY(0.5rem);
 }

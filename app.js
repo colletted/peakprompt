@@ -38,6 +38,8 @@ const STEP_STRIDE_M = 0.75; // estimated hiking stride
 let data = null;
 let renderer, scene, camera;
 let interactives = [];
+/** Front-camera portraits for SELFIES (timeline rolodex) mode. */
+let selfieInteractives = [];
 let audioClips = [];
 let trackCurve = null;
 let trackMesh = null;
@@ -61,7 +63,7 @@ let lastLyricKey = "";
 let smoothLyricProgress = 0;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
-const VIEW_MODES = ["elevation", "timeline", "selfies"];
+const VIEW_MODES = ["elevation", "timeline"];
 let viewMode = "elevation";
 let timelineFocus = 0;
 let timelineFocusSmooth = 0;
@@ -83,6 +85,15 @@ let selfieDrag = {
   yawT: 0,
   pitchT: 0,
 };
+/** Press-and-hold: dark inspect with the original photo centered. */
+let inspectHold = {
+  active: false,
+  group: null,
+  pointerId: null,
+  token: 0,
+};
+const inspectRaycaster = new THREE.Raycaster();
+const inspectPointer = new THREE.Vector2();
 
 const thresholdResponse = 0.8;
 const layerResponse = 0.8;
@@ -372,11 +383,155 @@ function spacePick(arr, n) {
   return out;
 }
 
+const SELFIE_MAX = 36;
+
+function isFrontCameraItem(item) {
+  const s = `${item?.id || ""} ${item?.name || ""} ${item?.path || ""}`.toLowerCase();
+  return s.includes("front_");
+}
+
+function isUuidPortraitName(name = "") {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpe?g|heic|png)$/i.test(
+    name
+  );
+}
+
+/** Named selfie / portrait exports (combined_ dual-cam thumbs are often undecodable). */
+function isSelfieItem(item) {
+  const name = item?.name || "";
+  if (isFrontCameraItem(item)) return true;
+  if (isUuidPortraitName(name)) return true;
+  return false;
+}
+
+function withTrackCoords(item, gpx) {
+  const pt = nearestPoint(gpx.track, item.ts);
+  return {
+    ...item,
+    lat: item.lat ?? pt.lat,
+    lon: item.lon ?? pt.lon,
+    ele: item.ele ?? pt.ele,
+  };
+}
+
+/** Rough skin + fill check for a clear human figure in frame. */
+function estimateHumanPresence(pixels, w, h) {
+  let skin = 0;
+  let centerSkin = 0;
+  let center = 0;
+  let fill = 0;
+  const total = w * h;
+  for (let y = 0, i = 0; y < h; y++) {
+    for (let x = 0; x < w; x++, i += 4) {
+      const r = pixels[i];
+      const g = pixels[i + 1];
+      const b = pixels[i + 2];
+      const a = pixels[i + 3];
+      if (a < 160) continue;
+      const nx = (x / w - 0.5) / 0.35;
+      const ny = (y / h - 0.5) / 0.45;
+      const inCenter = nx * nx + ny * ny < 1;
+      if (inCenter) center++;
+      const mean = (r + g + b) / 3;
+      if (mean > 18 && mean < 245) fill++;
+      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+      const skinTone =
+        r >= 60 &&
+        g >= 30 &&
+        b >= 15 &&
+        r >= g &&
+        r >= b &&
+        chroma >= 15 &&
+        r - g > 10 &&
+        r - b > 15;
+      if (skinTone) {
+        skin++;
+        if (inCenter) centerSkin++;
+      }
+    }
+  }
+  const skinFrac = total ? skin / total : 0;
+  const centerSkinFrac = center ? centerSkin / center : 0;
+  const fillFrac = total ? fill / total : 0;
+  const score = centerSkinFrac * 0.62 + skinFrac * 0.28 + fillFrac * 0.1;
+  return { skinFrac, centerSkinFrac, fillFrac, score };
+}
+
+function hasClearHumanSilhouette(gray) {
+  const human = gray?.human;
+  if (!human) return false;
+  if (human.fillFrac < 0.45) return false;
+  // Need a readable figure — centre skin is the strongest cue we have client-side
+  return human.centerSkinFrac >= 0.08 && human.skinFrac >= 0.035;
+}
+
+/** Named selfie candidates first, then fill with portrait frames that have a clear human. */
+async function resolveSelfieMedia(media, gpx) {
+  const named = media
+    .filter(
+      (m) =>
+        isSelfieItem(m) &&
+        m.thumb &&
+        (m.kind === "image" || m.kind === "video")
+    )
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0))
+    .map((m) => withTrackCoords(m, gpx));
+
+  const picked = [];
+  const seen = new Set();
+
+  const tryAdd = async (item, { requirePortrait = true } = {}) => {
+    if (!item?.thumb || !item.path || seen.has(item.path)) return;
+    if (picked.length >= SELFIE_MAX) return;
+    try {
+      const gray = await getGrayBuffer(item.thumb);
+      if (!hasClearHumanSilhouette(gray)) return;
+      const portrait = gray.height >= gray.width * 0.92;
+      if (requirePortrait && !isFrontCameraItem(item) && !portrait) return;
+      seen.add(item.path);
+      picked.push(item);
+    } catch {
+      // undecodable / empty thumb — skip so the rolodex stays dense
+    }
+  };
+
+  for (const item of named) {
+    await tryAdd(item, { requirePortrait: false });
+  }
+
+  if (picked.length < SELFIE_MAX) {
+    const extras = media
+      .filter(
+        (m) =>
+          m.kind === "image" &&
+          m.thumb &&
+          m.source === "iphone" &&
+          !m.onTrack &&
+          !isSelfieItem(m) &&
+          !seen.has(m.path)
+      )
+      .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+
+    for (const raw of spacePick(extras, 64)) {
+      if (picked.length >= SELFIE_MAX) break;
+      await tryAdd(withTrackCoords(raw, gpx), { requirePortrait: true });
+    }
+  }
+
+  return picked.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+}
+
+function timelineCards() {
+  return selfieInteractives;
+}
+
 function sampleMedia(media, gpx) {
-  const onTrack = media.filter(
+  // Keep selfie / portrait set out of THE HIKE
+  const hikeMedia = media.filter((m) => !isSelfieItem(m));
+  const onTrack = hikeMedia.filter(
     (m) => m.onTrack && (m.kind === "image" || m.kind === "video") && m.thumb
   );
-  const offTrack = media.filter(
+  const offTrack = hikeMedia.filter(
     (m) => !m.onTrack && (m.kind === "image" || m.kind === "video") && m.thumb
   );
   const before = offTrack
@@ -562,6 +717,11 @@ function sampleJourneyColor(field, t) {
 }
 
 function applyJourneyAtmosphere(progress) {
+  if (inspectHold.active) {
+    applyInspectAtmosphere();
+    return;
+  }
+
   const key = sampleJourneyColor(journeyColors, progress);
   smoothJourneyColor = lerpRgb(smoothJourneyColor, key, 0.07);
 
@@ -948,6 +1108,7 @@ async function getGrayBuffer(url) {
   }
   const palette = extractDepthPalette(pixels, stretched, cutA, cutB);
   const avgColor = averageColorFromPixels(pixels);
+  const human = estimateHumanPresence(pixels, w, h);
   const entry = {
     width: w,
     height: h,
@@ -960,6 +1121,7 @@ async function getGrayBuffer(url) {
     avgColor,
     keyColor: palette.mid,
     closeness: estimateCloseness(gray, w, h),
+    human,
     sourceUrl: url,
   };
   imageCache.set(url, entry);
@@ -1197,6 +1359,7 @@ function applyMarkerVisualMode(group, mode) {
 
 function setAllMarkersVisualMode(mode) {
   for (const g of interactives) applyMarkerVisualMode(g, mode);
+  for (const g of selfieInteractives) applyMarkerVisualMode(g, mode);
 }
 
 async function rebuildMarkerVisuals(group) {
@@ -1240,6 +1403,7 @@ async function rebuildMarkerVisuals(group) {
     );
     flatPlane.position.y = 18;
     flatPlane.userData.flatSwatch = true;
+    flatPlane.userData.hitGroup = group;
     flatPlane.visible = showFlat;
     facing.add(flatPlane);
     group.userData.flatPlane = flatPlane;
@@ -1267,6 +1431,7 @@ async function rebuildMarkerVisuals(group) {
       plane.position.z = layout.z;
       plane.userData.baseZ = layout.z;
       plane.userData.depthRole = role;
+      plane.userData.hitGroup = group;
       plane.scale.set(layout.scale, layout.scale, 1);
       plane.visible = !showFlat;
       facing.add(plane);
@@ -1277,6 +1442,7 @@ async function rebuildMarkerVisuals(group) {
   }
 
   group.userData.planes = planes;
+  group.userData.sourcePlane = null;
   group.userData.timeT = timeTForItem(item);
   group.userData.closeness = closeness;
   group.userData.keyColor = keyColor;
@@ -1338,190 +1504,23 @@ function restoreHikeLayout() {
   restoreJourneyFog();
 }
 
-function isFrontCameraItem(item) {
-  const s = `${item?.id || ""} ${item?.name || ""} ${item?.path || ""}`.toLowerCase();
-  return s.includes("front_");
-}
-
-async function detectFaces(img) {
-  if (typeof FaceDetector !== "function") return null;
-  try {
-    const detector = new FaceDetector({ fastMode: true, maxDetectedFaces: 3 });
-    return await detector.detect(img);
-  } catch {
-    return null;
-  }
-}
-
-/** Rough skin presence in the frame centre — fallback when FaceDetector is missing. */
-function skinFaceScore(img) {
-  const canvas = document.createElement("canvas");
-  const maxW = 160;
-  const scale = Math.min(1, maxW / img.naturalWidth);
-  const w = Math.max(1, Math.round(img.naturalWidth * scale));
-  const h = Math.max(1, Math.round(img.naturalHeight * scale));
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0, w, h);
-  const { data } = ctx.getImageData(0, 0, w, h);
-  let skin = 0;
-  let n = 0;
-  const y0 = Math.floor(h * 0.12);
-  const y1 = Math.floor(h * 0.88);
-  const x0 = Math.floor(w * 0.12);
-  const x1 = Math.floor(w * 0.88);
-  for (let y = y0; y < y1; y += 2) {
-    for (let x = x0; x < x1; x += 2) {
-      const i = (y * w + x) * 4;
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      if (r > 80 && g > 40 && b > 20 && r > g && r > b && r - g > 10) skin++;
-      n++;
-    }
-  }
-  return n ? skin / n : 0;
-}
-
-function canvasToPortraitTexture(canvas) {
-  // Force portrait output (taller than wide)
-  let out = canvas;
-  if (canvas.width >= canvas.height) {
-    const targetW = Math.max(1, Math.round(canvas.height * 0.75));
-    const x0 = Math.max(0, Math.round((canvas.width - targetW) / 2));
-    const cropped = document.createElement("canvas");
-    cropped.width = targetW;
-    cropped.height = canvas.height;
-    cropped
-      .getContext("2d")
-      .drawImage(
-        canvas,
-        x0,
-        0,
-        targetW,
-        canvas.height,
-        0,
-        0,
-        targetW,
-        canvas.height
-      );
-    out = cropped;
-  }
-  const tex = new THREE.CanvasTexture(out);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 2;
-  tex.needsUpdate = true;
-  return {
-    texture: tex,
-    aspect: out.width / Math.max(out.height, 1),
-  };
-}
-
-function drawRotatedImage(img, rotCW) {
-  const srcW = img.naturalWidth;
-  const srcH = img.naturalHeight;
-  const canvas = document.createElement("canvas");
-  if (rotCW % 180 === 0) {
-    canvas.width = srcW;
-    canvas.height = srcH;
-  } else {
-    canvas.width = srcH;
-    canvas.height = srcW;
-  }
-  const ctx = canvas.getContext("2d");
-  ctx.translate(canvas.width / 2, canvas.height / 2);
-  ctx.rotate((rotCW * Math.PI) / 180);
-  ctx.drawImage(img, -srcW / 2, -srcH / 2);
-  return canvas;
-}
-
-function cropAroundFace(img, box) {
-  const padX = box.width * 0.55;
-  const padY = box.height * 0.7;
-  let x = Math.max(0, box.x - padX);
-  let y = Math.max(0, box.y - padY);
-  let w = Math.min(img.naturalWidth - x, box.width + padX * 2);
-  let h = Math.min(img.naturalHeight - y, box.height + padY * 2);
-  // Prefer a portrait window
-  const targetAspect = 0.75; // w/h
-  if (w / h > targetAspect) {
-    const newW = h * targetAspect;
-    x += (w - newW) / 2;
-    w = newW;
-  } else {
-    const newH = w / targetAspect;
-    y = Math.max(0, y + (h - newH) / 2);
-    h = Math.min(img.naturalHeight - y, newH);
-  }
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(w));
-  canvas.height = Math.max(1, Math.round(h));
-  canvas
-    .getContext("2d")
-    .drawImage(
-      img,
-      x,
-      y,
-      w,
-      h,
-      0,
-      0,
-      canvas.width,
-      canvas.height
+function loadTexture(url) {
+  return new Promise((resolve, reject) => {
+    const loader = new THREE.TextureLoader();
+    loader.load(
+      url,
+      (tex) => {
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.anisotropy = 2;
+        resolve(tex);
+      },
+      undefined,
+      reject
     );
-  return canvas;
+  });
 }
 
-/**
- * Keep only frames with a human face, upright as a portrait.
- * Front-camera stills in this set are often stored sideways.
- */
-async function preparePortraitSelfie(item) {
-  const img = await loadImageElement(item.thumb);
-  const facesRaw = await detectFaces(img);
-  const skin = skinFaceScore(img);
-  const front = isFrontCameraItem(item);
-  // FaceDetector may miss; front-camera + skin still counts as a human selfie
-  const faces =
-    facesRaw && facesRaw.length === 0 && front && skin > 0.07
-      ? null
-      : facesRaw;
-
-  if (faces && faces.length === 0) return null;
-  if (faces === null && !(front && skin > 0.07)) return null;
-
-  const landscape = img.naturalWidth > img.naturalHeight * 1.05;
-  let canvas = null;
-
-  if (faces?.length) {
-    const box = faces[0].boundingBox;
-    if (landscape && box.height > box.width * 1.05) {
-      // Face is sideways in a landscape file — rotate upright
-      const cx = box.x + box.width / 2;
-      const rot = cx >= img.naturalWidth * 0.5 ? 90 : 270;
-      canvas = drawRotatedImage(img, rot);
-    } else if (landscape) {
-      // Upright face in a wide frame — crop to a portrait around the person
-      canvas = cropAroundFace(img, box);
-    } else {
-      canvas = drawRotatedImage(img, 0);
-      // Tighten to the face when the portrait still includes a lot of scenery
-      if (box.height * box.width < img.naturalWidth * img.naturalHeight * 0.22) {
-        canvas = cropAroundFace(img, box);
-      }
-    }
-  } else if (front && landscape) {
-    // Dataset default: front-camera thumbs need a quarter-turn
-    canvas = drawRotatedImage(img, 90);
-  } else {
-    canvas = drawRotatedImage(img, 0);
-  }
-
-  return canvasToPortraitTexture(canvas);
-}
-
-/** Pull human portrait stills onto one shared wall plane. */
+/** Pull front-camera stills onto one shared wall plane. */
 async function buildSelfiePlane() {
   if (selfieGroup) {
     scene.remove(selfieGroup);
@@ -1530,57 +1529,21 @@ async function buildSelfiePlane() {
 
   selfieGroup = new THREE.Group();
   selfieGroup.visible = false;
-
-  const candidates = (data?.media || [])
-    .filter((m) => m.kind === "image" && m.thumb && isFrontCameraItem(m))
+  selfieItems = (data?.media || [])
+    .filter((m) => isFrontCameraItem(m) && m.kind === "image" && m.thumb)
     .sort((a, b) => (a.ts || 0) - (b.ts || 0));
 
-  const prepared = [];
-  for (const item of candidates) {
-    try {
-      const result = await preparePortraitSelfie(item);
-      if (result) prepared.push({ item, ...result });
-    } catch (err) {
-      console.warn("Selfie portrait prepare failed", item.thumb, err);
-    }
-  }
-
-  // If front-camera set is tiny, also accept other close human portraits
-  if (prepared.length < 3) {
-    const extras = (data?.media || [])
-      .filter(
-        (m) =>
-          m.kind === "image" &&
-          m.thumb &&
-          !isFrontCameraItem(m) &&
-          m.source === "iphone"
-      )
-      .sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    // Cap how many we scan — face detection is the gate
-    for (const item of extras.slice(0, 80)) {
-      try {
-        const result = await preparePortraitSelfie(item);
-        if (result) prepared.push({ item, ...result });
-        if (prepared.length >= 12) break;
-      } catch {
-        // skip
-      }
-    }
-  }
-
-  selfieItems = prepared.map((p) => p.item);
-  const n = prepared.length;
+  const n = selfieItems.length;
   if (!n) {
     scene.add(selfieGroup);
     return;
   }
 
-  const cols = Math.min(4, Math.ceil(Math.sqrt(n)));
+  const cols = Math.ceil(Math.sqrt(n));
   const rows = Math.ceil(n / cols);
-  const cellH = 28;
-  const gap = 2.2;
-  // Use a common portrait width; individual meshes keep their aspect
-  const cellW = cellH * 0.75;
+  const cellW = 20;
+  const cellH = 26;
+  const gap = 2.4;
   const boardW = cols * (cellW + gap) + gap;
   const boardH = rows * (cellH + gap) + gap;
 
@@ -1597,28 +1560,34 @@ async function buildSelfiePlane() {
   board.userData.board = true;
   selfieGroup.add(board);
 
-  prepared.forEach((entry, i) => {
-    const w = cellH * clamp(entry.aspect || 0.75, 0.55, 0.85);
-    const mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(w, cellH),
-      new THREE.MeshBasicMaterial({
-        map: entry.texture,
-        side: THREE.DoubleSide,
-        transparent: true,
-      })
-    );
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-    mesh.position.set(
-      (col - (cols - 1) / 2) * (cellW + gap),
-      ((rows - 1) / 2 - row) * (cellH + gap),
-      0.05
-    );
-    mesh.userData.item = entry.item;
-    mesh.userData.selfieIndex = i;
-    mesh.userData.baseScale = 1;
-    selfieGroup.add(mesh);
-  });
+  await Promise.all(
+    selfieItems.map(async (item, i) => {
+      try {
+        const tex = await loadTexture(item.thumb);
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(cellW, cellH),
+          new THREE.MeshBasicMaterial({
+            map: tex,
+            side: THREE.DoubleSide,
+            transparent: true,
+          })
+        );
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        mesh.position.set(
+          (col - (cols - 1) / 2) * (cellW + gap),
+          ((rows - 1) / 2 - row) * (cellH + gap),
+          0.05
+        );
+        mesh.userData.item = item;
+        mesh.userData.selfieIndex = i;
+        mesh.userData.baseScale = 1;
+        selfieGroup.add(mesh);
+      } catch (err) {
+        console.warn("Selfie texture failed", item.thumb, err);
+      }
+    })
+  );
 
   scene.add(selfieGroup);
 }
@@ -1631,22 +1600,33 @@ function setHikeWorldVisible(visible) {
   if (trackMesh) trackMesh.visible = visible;
 }
 
+function setSelfieCardsVisible(visible) {
+  for (const g of selfieInteractives) {
+    g.visible = visible;
+    if (!visible) setGroupPresence(g, 0);
+  }
+}
+
 function enterTimelineMode() {
   document.documentElement.style.overflow = "hidden";
-  setHikeWorldVisible(true);
-  for (const g of interactives) setStemVisible(g, false);
+  setHikeWorldVisible(false);
+  setSelfieCardsVisible(true);
+  for (const g of selfieInteractives) {
+    setStemVisible(g, false);
+    applyMarkerVisualMode(g, "layers");
+  }
   if (trackMesh) trackMesh.visible = false;
   if (selfieGroup) selfieGroup.visible = false;
   if (scene?.fog) {
     scene.fog.near = 40;
     scene.fog.far = 280;
   }
-  // Start near the current hike progress so the switch feels continuous
-  const n = Math.max(interactives.length - 1, 1);
+  const cards = timelineCards();
+  const n = Math.max(cards.length - 1, 1);
   let best = 0;
   let bestD = Infinity;
-  for (let i = 0; i < interactives.length; i++) {
-    const d = Math.abs(interactives[i].userData.timeT - smoothProgress);
+  for (let i = 0; i < cards.length; i++) {
+    const d = Math.abs(cards[i].userData.timeT - smoothProgress);
     if (d < bestD) {
       bestD = d;
       best = i;
@@ -1654,13 +1634,15 @@ function enterTimelineMode() {
   }
   timelineFocus = best;
   timelineFocusSmooth = best;
-  timelinePointerX = n <= 0 ? 0.5 : best / n;
+  timelinePointerX = cards.length <= 1 ? 0.5 : best / n;
   if (els.scrollHint) {
-    els.scrollHint.textContent = "MOVE TO BROWSE";
+    els.scrollHint.textContent = cards.length
+      ? "MOVE TO BROWSE"
+      : "NO SELFIES FOUND";
     els.scrollHint.classList.remove("is-gone");
     hintHidden = false;
   }
-  if (els.viewport) els.viewport.setAttribute("aria-label", "Timeline rolodex");
+  if (els.viewport) els.viewport.setAttribute("aria-label", "Selfies rolodex");
 }
 
 function enterSelfieMode() {
@@ -1691,6 +1673,7 @@ function enterSelfieMode() {
 function enterElevationMode() {
   document.documentElement.style.overflow = "";
   if (selfieGroup) selfieGroup.visible = false;
+  setSelfieCardsVisible(false);
   restoreHikeLayout();
   setHikeWorldVisible(true);
   restoreJourneyFog();
@@ -1712,38 +1695,40 @@ function enterElevationMode() {
 
 function updateModeToggle() {
   if (!els.modeToggle) return;
+  // Timeline rolodex is presented as SELFIES in the UI
   const labels = {
-    elevation: "ELEVATION",
-    timeline: "TIMELINE",
-    selfies: "SELFIES",
+    elevation: "THE HIKE",
+    timeline: "SELFIES",
   };
   const next = VIEW_MODES[(VIEW_MODES.indexOf(viewMode) + 1) % VIEW_MODES.length];
-  els.modeToggle.textContent = labels[next];
+  els.modeToggle.textContent = labels[viewMode] || "THE HIKE";
   els.modeToggle.setAttribute(
     "aria-pressed",
     viewMode === "elevation" ? "false" : "true"
   );
   els.modeToggle.setAttribute(
     "aria-label",
-    `Switch to ${labels[next].toLowerCase()} view`
+    `Current view ${labels[viewMode] || "THE HIKE"}. Click for ${labels[next]}`
   );
 }
 
 function setViewMode(mode) {
   if (!VIEW_MODES.includes(mode) || mode === viewMode) return;
   if (introActive) endIntro({ keepHint: true });
+  endInspect();
 
   if (viewMode === "elevation") savedScrollY = window.scrollY;
-  if (viewMode === "timeline" || viewMode === "selfies") {
-    // tidy shared non-elevation state before entering the next mode
+  if (viewMode === "timeline") {
     document.documentElement.style.overflow = "";
   }
 
   viewMode = mode;
   els.experience?.setAttribute("data-mode", mode);
 
+  // Hide the flat selfie board — SELFIES mode is the timeline rolodex
+  if (selfieGroup) selfieGroup.visible = false;
+
   if (mode === "timeline") enterTimelineMode();
-  else if (mode === "selfies") enterSelfieMode();
   else enterElevationMode();
 
   updateModeToggle();
@@ -1754,14 +1739,269 @@ function toggleViewMode() {
   setViewMode(next);
 }
 
+function activeInspectMarkers() {
+  return viewMode === "timeline" ? selfieInteractives : interactives;
+}
+
+function pickMarkerAt(clientX, clientY) {
+  if (!camera || !els.viewport) return null;
+  const rect = els.viewport.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  inspectPointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  inspectPointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  inspectRaycaster.setFromCamera(inspectPointer, camera);
+
+  const meshes = [];
+  for (const g of activeInspectMarkers()) {
+    if (!g.visible) continue;
+    for (const p of g.userData.planes || []) {
+      if (p.visible) meshes.push(p);
+    }
+    const flat = g.userData.flatPlane;
+    if (flat?.visible) meshes.push(flat);
+  }
+  if (!meshes.length) return null;
+  const hits = inspectRaycaster.intersectObjects(meshes, false);
+  return hits[0]?.object?.userData?.hitGroup || null;
+}
+
+function photoPlaneSize(tex, base = 18) {
+  const img = tex?.image;
+  const aspect = Math.max(0.35, (img?.naturalWidth || img?.width || 4) / (img?.naturalHeight || img?.height || 3));
+  if (aspect >= 1) return { w: base, h: base / aspect };
+  return { w: base * aspect, h: base };
+}
+
+async function ensureSourcePlane(group) {
+  if (group.userData.sourcePlane) return group.userData.sourcePlane;
+  const item = group.userData.item;
+  const url = item?.thumb || item?.path;
+  if (!url) return null;
+  const facing = group.userData.facing;
+  if (!facing) return null;
+
+  const tex = await loadTexture(url);
+  const { w, h } = photoPlaneSize(tex);
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      depthWrite: true,
+      side: THREE.DoubleSide,
+    })
+  );
+  mesh.position.set(0, 18, 0.2);
+  mesh.visible = false;
+  mesh.userData.sourcePhoto = true;
+  mesh.userData.hitGroup = group;
+  facing.add(mesh);
+  group.userData.sourcePlane = mesh;
+  return mesh;
+}
+
+function setInspectVisuals(group, on) {
+  const layered = !introActive;
+  for (const p of group.userData.planes || []) {
+    p.visible = !on && layered;
+  }
+  if (group.userData.flatPlane) {
+    group.userData.flatPlane.visible = !on && !layered;
+  }
+  if (group.userData.sourcePlane) {
+    group.userData.sourcePlane.visible = on;
+  }
+  setStemVisible(group, !on && viewMode === "elevation" && !introActive);
+}
+
+function inspectBackdropColor(group) {
+  const avg = group?.userData?.avgColor || group?.userData?.keyColor || {
+    r: 140,
+    g: 140,
+    b: 140,
+  };
+  // Backdrop = inverted average colour of the held photo
+  return {
+    r: (255 - clamp(avg.r, 0, 255)) / 255,
+    g: (255 - clamp(avg.g, 0, 255)) / 255,
+    b: (255 - clamp(avg.b, 0, 255)) / 255,
+  };
+}
+
+function applyInspectAtmosphere() {
+  const bg = inspectBackdropColor(inspectHold.group);
+  if (scene?.background) scene.background.setRGB(bg.r, bg.g, bg.b);
+  if (scene?.fog) {
+    scene.fog.color.setRGB(bg.r, bg.g, bg.b);
+    scene.fog.near = 40;
+    scene.fog.far = 260;
+  }
+  if (trackMesh) trackMesh.visible = false;
+  const css = `rgb(${Math.round(bg.r * 255)}, ${Math.round(bg.g * 255)}, ${Math.round(bg.b * 255)})`;
+  document.documentElement.style.setProperty("--inspect-bg", css);
+  const luma = bg.r * 0.299 + bg.g * 0.587 + bg.b * 0.114;
+  document.documentElement.style.setProperty(
+    "--inspect-ink",
+    luma > 0.55 ? "#111111" : "#f2f2f2"
+  );
+  els.experience?.setAttribute("data-inspect", "true");
+  document.documentElement.classList.add("is-inspecting");
+}
+
+async function beginInspect(group, pointerId = null) {
+  if (!group) return;
+  inspectHold.token += 1;
+  const token = inspectHold.token;
+  inspectHold.active = true;
+  inspectHold.group = group;
+  inspectHold.pointerId = pointerId;
+  applyInspectAtmosphere();
+
+  // Dim everything else immediately
+  for (const g of activeInspectMarkers()) {
+    if (g === group) {
+      g.visible = true;
+      g.scale.setScalar(1);
+      continue;
+    }
+    setGroupPresence(g, 0);
+  }
+
+  try {
+    await ensureSourcePlane(group);
+  } catch (err) {
+    console.warn("Inspect photo failed", err);
+  }
+  if (token !== inspectHold.token || !inspectHold.active) return;
+  setInspectVisuals(group, true);
+  ensureAudioCtx();
+}
+
+function endInspect() {
+  if (!inspectHold.active && !inspectHold.group) {
+    els.experience?.removeAttribute("data-inspect");
+    document.documentElement.classList.remove("is-inspecting");
+    document.documentElement.style.removeProperty("--inspect-bg");
+    document.documentElement.style.removeProperty("--inspect-ink");
+    return;
+  }
+  const group = inspectHold.group;
+  inspectHold.active = false;
+  inspectHold.group = null;
+  inspectHold.pointerId = null;
+  inspectHold.token += 1;
+
+  els.experience?.removeAttribute("data-inspect");
+  document.documentElement.classList.remove("is-inspecting");
+  document.documentElement.style.removeProperty("--inspect-bg");
+  document.documentElement.style.removeProperty("--inspect-ink");
+
+  if (group) {
+    setInspectVisuals(group, false);
+    if (group.userData.sourcePlane) {
+      group.userData.sourcePlane.position.set(0, 18, 0.2);
+    }
+    group.quaternion.identity();
+    const home = group.userData.hikePos;
+    if (viewMode === "elevation" && home) {
+      group.position.copy(home);
+      group.rotation.set(0, 0, 0);
+      const facing = group.userData.facing;
+      if (facing) {
+        applyCaptureFacing(facing, headingForItem(group.userData.item));
+        facing.position.set(0, 0, 0);
+        facing.rotation.x = 0;
+        facing.rotation.z = 0;
+        facing.scale.setScalar(1);
+      }
+    }
+  }
+
+  if (viewMode === "elevation") {
+    if (trackMesh) trackMesh.visible = true;
+    restoreJourneyFog();
+  } else if (trackMesh) {
+    trackMesh.visible = false;
+  }
+}
+
+function updateInspectFrame() {
+  const group = inspectHold.group;
+  if (!group || !camera) return;
+
+  applyInspectAtmosphere();
+
+  for (const g of activeInspectMarkers()) {
+    if (g === group) {
+      g.visible = true;
+      g.scale.setScalar(1);
+      continue;
+    }
+    setGroupPresence(g, 0);
+  }
+
+  // Hold the original photo dead-center in front of the camera
+  _tmp.set(0, 0, -46).applyQuaternion(camera.quaternion).add(camera.position);
+  group.position.lerp(_tmp, 0.28);
+  group.quaternion.slerp(camera.quaternion, 0.28);
+  group.scale.setScalar(1);
+
+  const facing = group.userData.facing;
+  if (facing) {
+    facing.position.set(0, 0, 0);
+    facing.rotation.set(0, 0, 0);
+    facing.scale.setScalar(1);
+  }
+  const src = group.userData.sourcePlane;
+  if (src) src.position.set(0, 0, 0.2);
+  setInspectVisuals(group, true);
+
+  const item = group.userData.item;
+  const progress = group.userData.timeT ?? smoothProgress;
+  updateCornerMeta(clamp(progress, 0, 1), item);
+  setBrandWeightFromCloseness(0.72, captionForItem(item));
+}
+
+function onInspectPointerDown(e) {
+  if (e.button != null && e.button !== 0) return;
+  if (inspectHold.active) return;
+  const group = pickMarkerAt(e.clientX, e.clientY);
+  if (!group) return;
+  e.preventDefault();
+  e.stopPropagation();
+  try {
+    els.viewport?.setPointerCapture?.(e.pointerId);
+  } catch {
+    /* ignore */
+  }
+  beginInspect(group, e.pointerId);
+}
+
+function onInspectPointerUp(e) {
+  if (!inspectHold.active) return;
+  if (
+    inspectHold.pointerId != null &&
+    e.pointerId != null &&
+    e.pointerId !== inspectHold.pointerId
+  ) {
+    return;
+  }
+  try {
+    els.viewport?.releasePointerCapture?.(e.pointerId);
+  } catch {
+    /* ignore */
+  }
+  endInspect();
+}
+
 function timelineIndexFromPointer(nx) {
-  const n = interactives.length;
+  const n = timelineCards().length;
   if (n <= 1) return 0;
   return clamp(nx, 0, 1) * (n - 1);
 }
 
 function onTimelinePointer(e) {
-  if (viewMode !== "timeline" || !els.viewport) return;
+  if (viewMode !== "timeline" || !els.viewport || inspectHold.active) return;
   const rect = els.viewport.getBoundingClientRect();
   if (rect.width <= 0) return;
   timelinePointerX = clamp((e.clientX - rect.left) / rect.width, 0, 1);
@@ -1771,13 +2011,27 @@ function onTimelinePointer(e) {
 }
 
 function onTimelineWheel(e) {
-  if (viewMode !== "timeline") return;
+  if (viewMode !== "timeline" || inspectHold.active) return;
   e.preventDefault();
-  const n = Math.max(interactives.length - 1, 1);
+  const n = Math.max(timelineCards().length - 1, 1);
   timelineFocus = clamp(timelineFocus + e.deltaY * 0.01, 0, n);
   timelinePointerX = timelineFocus / n;
   if (!hintHidden) hideHint();
   ensureAudioCtx();
+}
+
+function onViewportWheel(e) {
+  if (inspectHold.active) {
+    e.preventDefault();
+    return;
+  }
+  if (viewMode === "timeline") {
+    onTimelineWheel(e);
+    return;
+  }
+  // Viewport captures pointer events for inspect — forward scroll to the page
+  e.preventDefault();
+  window.scrollBy(0, e.deltaY);
 }
 
 function onSelfiePointerDown(e) {
@@ -1850,12 +2104,23 @@ function updateSelfies(clockSec = 0) {
 }
 
 function updateTimeline(clockSec = 0) {
-  if (!camera || !interactives.length) return;
+  const cards = timelineCards();
+  if (!camera || !cards.length) return;
+  if (selfieGroup) selfieGroup.visible = false;
+  if (inspectHold.active) {
+    // Keep the rolodex camera, then pin the held photo in the middle
+    _camPos.set(0, 14, 78);
+    _look.set(0, 12, 0);
+    camera.position.lerp(_camPos, 0.18);
+    camera.lookAt(_look);
+    updateInspectFrame();
+    return;
+  }
 
   timelineFocusSmooth += (timelineFocus - timelineFocusSmooth) * 0.14;
 
-  const focusIdx = Math.round(clamp(timelineFocusSmooth, 0, interactives.length - 1));
-  const active = interactives[focusIdx];
+  const focusIdx = Math.round(clamp(timelineFocusSmooth, 0, cards.length - 1));
+  const active = cards[focusIdx];
   const activeItem = active?.userData?.item;
   const progress = active?.userData?.timeT ?? 0;
 
@@ -1868,8 +2133,8 @@ function updateTimeline(clockSec = 0) {
   let closeSum = 0;
   let closeW = 0;
 
-  for (let i = 0; i < interactives.length; i++) {
-    const g = interactives[i];
+  for (let i = 0; i < cards.length; i++) {
+    const g = cards[i];
     const d = i - timelineFocusSmooth;
     const abs = Math.abs(d);
     const x = d * TIMELINE_CARD_GAP;
@@ -2210,6 +2475,11 @@ function updateCornerMeta(progress, activeItem) {
 function updateJourney(progress, clockSec = 0) {
   if (viewMode !== "elevation") return;
   if (!trackCurve || !camera) return;
+  if (selfieGroup) selfieGroup.visible = false;
+  if (inspectHold.active) {
+    updateInspectFrame();
+    return;
+  }
 
   const u = clamp(progress, 0, 0.999);
   const pos = trackCurve.getPointAt(u);
@@ -2342,7 +2612,14 @@ async function buildWorld() {
   trackCurve = built.curve;
   scene.add(trackMesh);
 
-  const samples = sampleMedia(data.media, gpx);
+  // Resolve SELFIES first so blank / non-human frames never enter the rolodex
+  const selfieSamples = await resolveSelfieMedia(data.media, gpx);
+  const selfiePaths = new Set(selfieSamples.map((m) => m.path));
+
+  const samples = sampleMedia(
+    data.media.filter((m) => !selfiePaths.has(m.path)),
+    gpx
+  );
   interactives = [];
   await Promise.all(
     samples.map(async (item) => {
@@ -2356,6 +2633,23 @@ async function buildWorld() {
   interactives.sort((a, b) => a.userData.timeT - b.userData.timeT);
   calibrateClosenessExtent(interactives);
 
+  selfieInteractives = [];
+  await Promise.all(
+    selfieSamples.map(async (item) => {
+      const pos = positionForItem(item, project, trackPoints, trackCurve);
+      const marker = await makeMediaMarker(item, pos);
+      if (!(marker.userData.planes || []).length) {
+        marker.traverse((obj) => disposeObject3D(obj));
+        return;
+      }
+      marker.visible = false;
+      setGroupPresence(marker, 0);
+      scene.add(marker);
+      selfieInteractives.push(marker);
+    })
+  );
+  selfieInteractives.sort((a, b) => a.userData.timeT - b.userData.timeT);
+
   journeyColors = buildJourneyColorField(
     interactives.filter((g) => !g.userData.item?.beyond)
   );
@@ -2365,7 +2659,6 @@ async function buildWorld() {
 
   // Sound envelopes for motion (non-blocking if a clip fails)
   await loadSoundClips(data.media);
-  await buildSelfiePlane();
 
   beginAtTimelineStart();
   updateModeToggle();
@@ -2391,6 +2684,7 @@ function computeOverviewBounds() {
 /** Slow orbit of the full path + media constellation before the hike begins. */
 function updateOverview(clockSec) {
   if (!camera) return;
+  if (selfieGroup) selfieGroup.visible = false;
 
   if (scene?.fog) {
     scene.fog.near = overviewRadius * 0.9;
@@ -2483,8 +2777,26 @@ function animate() {
   const clockSec = performance.now() * 0.001;
   if (viewMode === "timeline") {
     updateTimeline(clockSec);
-  } else if (viewMode === "selfies") {
-    updateSelfies(clockSec);
+  } else if (inspectHold.active) {
+    if (introActive) {
+      updateOverview(clockSec);
+    } else {
+      // Keep camera on the trail while the held photo centers itself
+      smoothProgress += (scrollProgress - smoothProgress) * 0.085;
+      const u = clamp(smoothProgress, 0, 0.999);
+      if (trackCurve) {
+        const pos = trackCurve.getPointAt(u);
+        const tangent = trackCurve.getTangentAt(u).normalize();
+        _side.crossVectors(tangent, _up);
+        if (_side.lengthSq() < 1e-6) _side.set(1, 0, 0);
+        else _side.normalize();
+        _camPos.copy(pos).addScaledVector(_side, 95).addScaledVector(_up, 55);
+        _look.copy(pos).addScaledVector(tangent, 90).addScaledVector(_up, 18);
+        camera.position.lerp(_camPos, 0.12);
+        camera.lookAt(_look);
+      }
+    }
+    updateInspectFrame();
   } else if (introActive) {
     updateOverview(clockSec);
     updateJourneyLyric(0);
@@ -2525,11 +2837,11 @@ function bindModeControls() {
   els.viewport?.addEventListener("pointermove", onTimelinePointer, {
     passive: true,
   });
-  els.viewport?.addEventListener("wheel", onTimelineWheel, { passive: false });
-  els.viewport?.addEventListener("pointerdown", onSelfiePointerDown);
-  window.addEventListener("pointermove", onSelfiePointerMove, { passive: true });
-  window.addEventListener("pointerup", onSelfiePointerUp);
-  window.addEventListener("pointercancel", onSelfiePointerUp);
+  els.viewport?.addEventListener("wheel", onViewportWheel, { passive: false });
+  els.viewport?.addEventListener("pointerdown", onInspectPointerDown);
+  window.addEventListener("pointerup", onInspectPointerUp);
+  window.addEventListener("pointercancel", onInspectPointerUp);
+  window.addEventListener("blur", endInspect);
 }
 
 async function boot() {
