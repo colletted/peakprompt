@@ -34,6 +34,15 @@ const TIMELINE_CARD_GAP = 22;
 const TIMELINE_RECED = 11;
 const TIMELINE_YAW = 0.48;
 const STEP_STRIDE_M = 0.75; // estimated hiking stride
+const TUNNEL_IMAGE_CAP = 40;
+const TUNNEL_GAP = 14;
+const TUNNEL_WORLD_SIZE = 20; // fixed world height for cavern planes
+const TUNNEL_ROLE_ORDER = ["background", "mid", "foreground"];
+const TUNNEL_ROLE_SCALE = {
+  background: 1.16,
+  mid: 1,
+  foreground: 0.88,
+};
 
 let data = null;
 let renderer, scene, camera;
@@ -63,12 +72,16 @@ let lastLyricKey = "";
 let smoothLyricProgress = 0;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
-const VIEW_MODES = ["elevation", "timeline"];
+const VIEW_MODES = ["elevation", "timeline", "tunnel"];
 let viewMode = "elevation";
 let timelineFocus = 0;
 let timelineFocusSmooth = 0;
 let timelinePointerX = 0.5; // 0..1 across viewport
 let savedScrollY = 0;
+let tunnelGroup = null;
+let tunnelPlanes = [];
+let tunnelProgress = 0;
+let smoothTunnelProgress = 0;
 let introActive = true;
 let overviewCenter = new THREE.Vector3();
 let overviewRadius = 400;
@@ -1609,6 +1622,7 @@ function setSelfieCardsVisible(visible) {
 
 function enterTimelineMode() {
   document.documentElement.style.overflow = "hidden";
+  leaveTunnelMode();
   setHikeWorldVisible(false);
   setSelfieCardsVisible(true);
   for (const g of selfieInteractives) {
@@ -1670,8 +1684,137 @@ function enterSelfieMode() {
   setBrandWeightFromCloseness(0.45, captionForItem(selfieItems[0]));
 }
 
+function clearTunnelWorld() {
+  if (!tunnelGroup) return;
+  scene.remove(tunnelGroup);
+  tunnelGroup.traverse((obj) => {
+    // Tunnel planes share hike marker textures — don't dispose the maps
+    if (obj.material) {
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      mats.forEach((m) => {
+        m.map = null;
+        m.dispose();
+      });
+    }
+    if (obj.geometry) obj.geometry.dispose();
+  });
+  tunnelGroup = null;
+  tunnelPlanes = [];
+}
+
+function textureAspect(map) {
+  const img = map?.image;
+  const w = img?.naturalWidth || img?.width || 4;
+  const h = img?.naturalHeight || img?.height || 3;
+  return w / Math.max(h, 1e-6);
+}
+
+/** One transparent threshold band from a hike marker (shared texture map). */
+function tunnelPlaneFromLayer(srcPlane, group, role) {
+  const map = srcPlane?.material?.map;
+  if (!map) return null;
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({
+      map,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      opacity: 1,
+      alphaTest: 0.04,
+    })
+  );
+  mesh.userData.item = group.userData.item;
+  mesh.userData.timeT = group.userData.timeT;
+  mesh.userData.depthRole = role;
+  mesh.userData.roleScale = TUNNEL_ROLE_SCALE[role] ?? 1;
+  mesh.userData.aspect = textureAspect(map);
+  return mesh;
+}
+
+function ensureTunnelBuilt({ force = false } = {}) {
+  if (!force && tunnelGroup && tunnelPlanes.length) return;
+  clearTunnelWorld();
+
+  const markers = interactives
+    .filter((g) => (g.userData.planes || []).length)
+    .sort((a, b) => a.userData.timeT - b.userData.timeT);
+  const picks =
+    markers.length <= TUNNEL_IMAGE_CAP
+      ? markers
+      : spacePick(markers, TUNNEL_IMAGE_CAP);
+
+  tunnelGroup = new THREE.Group();
+  tunnelGroup.visible = false;
+  tunnelPlanes = [];
+
+  // For each image: travel background → mid → foreground (threshold cutouts)
+  picks.forEach((g) => {
+    const byRole = {};
+    for (const p of g.userData.planes || []) {
+      if (p.userData?.depthRole) byRole[p.userData.depthRole] = p;
+    }
+    for (const role of TUNNEL_ROLE_ORDER) {
+      const mesh = tunnelPlaneFromLayer(byRole[role], g, role);
+      if (!mesh) continue;
+      mesh.position.set(0, 0, -tunnelPlanes.length * TUNNEL_GAP);
+      mesh.userData.tunnelIndex = tunnelPlanes.length;
+      tunnelGroup.add(mesh);
+      tunnelPlanes.push(mesh);
+    }
+  });
+
+  scene.add(tunnelGroup);
+}
+
+function enterTunnelMode() {
+  document.documentElement.style.overflow = "";
+  setHikeWorldVisible(false);
+  setSelfieCardsVisible(false);
+  if (selfieGroup) selfieGroup.visible = false;
+  if (trackMesh) trackMesh.visible = false;
+
+  ensureTunnelBuilt({ force: true });
+  if (tunnelGroup) tunnelGroup.visible = true;
+  document.documentElement.classList.add("is-tunneling");
+
+  if (scene?.fog) {
+    scene.fog.near = 6;
+    scene.fog.far = 48;
+    scene.fog.color.setRGB(0.07, 0.07, 0.08);
+  }
+  if (scene?.background) scene.background.setRGB(0.07, 0.07, 0.08);
+
+  const vh = Math.max(640, tunnelPlanes.length * 36);
+  if (els.scrollRail) els.scrollRail.style.height = `${vh}vh`;
+
+  window.scrollTo(0, 0);
+  tunnelProgress = 0;
+  smoothTunnelProgress = 0;
+  scrollProgress = 0;
+  smoothProgress = 0;
+
+  if (els.scrollHint) {
+    els.scrollHint.textContent = tunnelPlanes.length
+      ? "SCROLL INTO THE TUNNEL"
+      : "NO LAYERS FOUND";
+    els.scrollHint.classList.remove("is-gone");
+    hintHidden = false;
+  }
+  if (els.viewport) {
+    els.viewport.setAttribute("aria-label", "Layer tunnel");
+  }
+}
+
+function leaveTunnelMode() {
+  if (tunnelGroup) tunnelGroup.visible = false;
+  if (els.scrollRail) els.scrollRail.style.height = "";
+  document.documentElement.classList.remove("is-tunneling");
+}
+
 function enterElevationMode() {
   document.documentElement.style.overflow = "";
+  leaveTunnelMode();
   if (selfieGroup) selfieGroup.visible = false;
   setSelfieCardsVisible(false);
   restoreHikeLayout();
@@ -1695,10 +1838,10 @@ function enterElevationMode() {
 
 function updateModeToggle() {
   if (!els.modeToggle) return;
-  // Timeline rolodex is presented as SELFIES in the UI
   const labels = {
     elevation: "THE HIKE",
     timeline: "SELFIES",
+    tunnel: "TUNNEL",
   };
   const next = VIEW_MODES[(VIEW_MODES.indexOf(viewMode) + 1) % VIEW_MODES.length];
   els.modeToggle.textContent = labels[viewMode] || "THE HIKE";
@@ -1721,6 +1864,7 @@ function setViewMode(mode) {
   if (viewMode === "timeline") {
     document.documentElement.style.overflow = "";
   }
+  if (viewMode === "tunnel") leaveTunnelMode();
 
   viewMode = mode;
   els.experience?.setAttribute("data-mode", mode);
@@ -1729,6 +1873,7 @@ function setViewMode(mode) {
   if (selfieGroup) selfieGroup.visible = false;
 
   if (mode === "timeline") enterTimelineMode();
+  else if (mode === "tunnel") enterTunnelMode();
   else enterElevationMode();
 
   updateModeToggle();
@@ -1965,6 +2110,7 @@ function updateInspectFrame() {
 function onInspectPointerDown(e) {
   if (e.button != null && e.button !== 0) return;
   if (inspectHold.active) return;
+  if (viewMode === "tunnel") return;
   const group = pickMarkerAt(e.clientX, e.clientY);
   if (!group) return;
   e.preventDefault();
@@ -2029,7 +2175,7 @@ function onViewportWheel(e) {
     onTimelineWheel(e);
     return;
   }
-  // Viewport captures pointer events for inspect — forward scroll to the page
+  // Viewport captures pointer events — forward scroll for hike + tunnel
   e.preventDefault();
   window.scrollBy(0, e.deltaY);
 }
@@ -2101,6 +2247,75 @@ function updateSelfies(clockSec = 0) {
     setBrandWeightFromCloseness(0.55, captionForItem(activeItem));
   }
   applyJourneyAtmosphere(0.5);
+}
+
+function updateTunnel() {
+  if (!camera || !tunnelPlanes.length) return;
+  if (tunnelGroup) tunnelGroup.visible = true;
+
+  tunnelProgress = readScrollProgress();
+  smoothTunnelProgress += (tunnelProgress - smoothTunnelProgress) * 0.055;
+
+  const n = tunnelPlanes.length;
+  // Drift forward through fixed planes — perspective grows each layer like a cavern
+  const startZ = TUNNEL_GAP * 2.2;
+  const endZ = -((n - 1) * TUNNEL_GAP) - TUNNEL_GAP * 1.4;
+  const camZ = lerp(startZ, endZ, smoothTunnelProgress);
+
+  camera.position.set(0, 0, camZ);
+  camera.lookAt(0, 0, camZ - 60);
+
+  // Keep fog in the cavern register (journey atmosphere would bleach it white)
+  if (scene?.background) scene.background.setRGB(0.07, 0.07, 0.08);
+  if (scene?.fog) {
+    scene.fog.color.setRGB(0.07, 0.07, 0.08);
+    scene.fog.near = 6;
+    scene.fog.far = 48;
+  }
+
+  let activeItem = null;
+  let bestAhead = Infinity;
+
+  for (let i = 0; i < n; i++) {
+    const mesh = tunnelPlanes[i];
+    const planeZ = -i * TUNNEL_GAP;
+    mesh.position.set(0, 0, planeZ);
+    mesh.rotation.set(0, 0, 0);
+
+    const ahead = camZ - planeZ; // distance still in front of the lens
+    if (ahead < 0.25 || ahead > TUNNEL_GAP * 9) {
+      mesh.visible = false;
+      continue;
+    }
+    mesh.visible = true;
+
+    // Fixed world size + aspect — camera motion supplies the zoom
+    const roleScale = mesh.userData.roleScale ?? 1;
+    const aspect = mesh.userData.aspect || 1;
+    const h = TUNNEL_WORLD_SIZE * roleScale;
+    const w = h * aspect;
+    mesh.scale.set(w, h, 1);
+
+    // Only soften right as you pass through a cutout; otherwise hold solid
+    const pass = ahead < TUNNEL_GAP * 0.85 ? clamp(ahead / (TUNNEL_GAP * 0.55), 0, 1) : 1;
+    const depthDim = clamp(1.05 - ahead / (TUNNEL_GAP * 8), 0.55, 1);
+    if (mesh.material) mesh.material.opacity = pass * depthDim;
+
+    if (ahead < bestAhead) {
+      bestAhead = ahead;
+      activeItem = mesh.userData.item;
+    }
+  }
+
+  const progress = clamp(smoothTunnelProgress, 0, 1);
+  updateCornerMeta(progress, activeItem);
+  syncSoundPlayback(progress);
+
+  const close = bestAhead < TUNNEL_GAP * 1.2 ? 0.64 : 0.36;
+  smoothCloseness += (close - smoothCloseness) * 0.12;
+  setBrandWeightFromCloseness(smoothCloseness, captionForItem(activeItem));
+
+  if (!hintHidden && smoothTunnelProgress > 0.02) hideHint();
 }
 
 function updateTimeline(clockSec = 0) {
@@ -2777,6 +2992,8 @@ function animate() {
   const clockSec = performance.now() * 0.001;
   if (viewMode === "timeline") {
     updateTimeline(clockSec);
+  } else if (viewMode === "tunnel") {
+    updateTunnel();
   } else if (inspectHold.active) {
     if (introActive) {
       updateOverview(clockSec);
@@ -2817,6 +3034,12 @@ function onResize() {
 }
 
 function onScroll() {
+  if (viewMode === "tunnel") {
+    tunnelProgress = readScrollProgress();
+    if (tunnelProgress > 0.01) hideHint();
+    ensureAudioCtx();
+    return;
+  }
   if (viewMode !== "elevation") return;
   scrollProgress = readScrollProgress();
   if (introActive && scrollProgress > 0.004) {
