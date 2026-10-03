@@ -120,7 +120,7 @@ body {
 .scroll-rail {
   position: relative;
   z-index: 2;
-  height: 520vh;
+  height: 720vh;
   pointer-events: none;
 }
 
@@ -222,6 +222,78 @@ body {
   transform: translateX(-50%) translateY(0.5rem);
 }
 
+.journey-lyrics {
+  position: fixed;
+  left: clamp(1rem, 4vw, 2.5rem);
+  bottom: calc(clamp(1.25rem, 4vh, 2.5rem) + 1.75rem);
+  z-index: 22;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  width: min(72vw, 18rem);
+  max-height: min(42vh, 16rem);
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+}
+
+.journey-lyrics.is-visible {
+  opacity: 1;
+}
+
+.experience[data-mode="timeline"] .journey-lyrics {
+  opacity: 0;
+}
+
+.journey-lyric-bubble {
+  margin: 0;
+  max-width: 100%;
+  padding: 0.55rem 0.85rem;
+  border-radius: 1.15rem 1.15rem 1.15rem 0.28rem;
+  background: #ebebeb;
+  color: #222222;
+  font-family: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.03em;
+  line-height: 1.35;
+  text-align: left;
+  white-space: pre-wrap;
+  opacity: 0;
+  transform: translateY(0.45rem) scale(0.94);
+  transform-origin: bottom left;
+  transition:
+    opacity 0.28s ease,
+    transform 0.28s ease,
+    background 0.2s ease;
+}
+
+.journey-lyric-bubble.is-in {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.journey-lyric-bubble.is-typing::after {
+  content: "▋";
+  margin-left: 0.08em;
+  font-size: 0.85em;
+  opacity: 0.45;
+  animation: lyric-caret 0.9s steps(1, end) infinite;
+}
+
+.journey-lyric-bubble.is-dim {
+  opacity: 0.55;
+}
+
+@keyframes lyric-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
 .experience[data-mode="timeline"] .scroll-hint {
   opacity: 1;
   transform: translateX(-50%);
@@ -235,5 +307,14 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .scroll-hint {
     transition: none;
+  }
+
+  .journey-lyric-bubble {
+    transition: none;
+  }
+
+  .journey-lyric-bubble.is-typing::after {
+    display: none;
+    animation: none;
   }
 }

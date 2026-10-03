@@ -5,6 +5,7 @@ const els = {
   viewport: document.getElementById("viewport"),
   scrollRail: document.getElementById("scroll-rail"),
   scrollHint: document.getElementById("scroll-hint"),
+  journeyLyrics: document.getElementById("journey-lyrics"),
   modeToggle: document.getElementById("mode-toggle"),
   metaTime: document.getElementById("meta-time"),
   metaAltitude: document.getElementById("meta-altitude"),
@@ -21,7 +22,7 @@ const fmtMetaTime = new Intl.DateTimeFormat(undefined, {
 });
 
 const BRAND_WEIGHTS = [300, 400, 500]; // light → regular → medium (no bold/heavy)
-const TITLE_FALLBACK = "quiet winding trail";
+const TITLE_FALLBACK = "grateful chasing summits";
 
 const VERTICAL_EXAGGERATION = 1.8;
 const MEDIA_SAMPLE = 72;
@@ -55,6 +56,11 @@ let audioUnlocked = false;
 let lastTitleKey = "";
 let titleText = TITLE_FALLBACK;
 let captionsById = {};
+let lyricLines = [];
+let lastLyricKey = "";
+let smoothLyricProgress = 0;
+let lyricBubbleIndex = -1;
+let lyricBubbleEl = null;
 let viewMode = "elevation"; // "elevation" | "timeline"
 let timelineFocus = 0;
 let timelineFocusSmooth = 0;
@@ -983,8 +989,14 @@ async function loadBrandFonts() {
 
 function captionForItem(item) {
   if (!item) return TITLE_FALLBACK;
+  const basename = (item.path || item.thumb || "")
+    .split("/")
+    .pop();
   const phrase =
-    captionsById[item.id] || captionsById[item.name] || TITLE_FALLBACK;
+    captionsById[item.id] ||
+    captionsById[item.name] ||
+    (basename ? captionsById[basename] : null) ||
+    TITLE_FALLBACK;
   return String(phrase).toLowerCase();
 }
 
@@ -1482,6 +1494,165 @@ function hideHint() {
   els.scrollHint?.classList.add("is-gone");
 }
 
+function stripRtfControls(text) {
+  return String(text)
+    .replace(/\\'[0-9a-fA-F]{2}/g, "")
+    .replace(/\\[a-zA-Z]+-?\d* ?/g, "")
+    .replace(/[{}]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Parse lyrics from .rtf (quoted lines), .txt (one per line), or .json array. */
+function parseLyricSource(text, path) {
+  if (path.endsWith(".json")) {
+    try {
+      const raw = JSON.parse(text);
+      return Array.isArray(raw)
+        ? raw.map((line) => String(line).trim()).filter(Boolean)
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  const quoted = [];
+  const re = /"([^"]*)"/g;
+  let match;
+  while ((match = re.exec(text))) {
+    const line = stripRtfControls(match[1]);
+    if (line) quoted.push(line);
+  }
+  if (quoted.length) return quoted;
+
+  return text
+    .split(/\r?\n/)
+    .map((line) => stripRtfControls(line))
+    .filter((line) => line && !line.startsWith("{\\rtf"));
+}
+
+async function loadLyricLines() {
+  const candidates = [
+    "data/lyrics.rtf",
+    "data/lyrics.txt",
+    "data/lyrics.json",
+  ];
+  for (const path of candidates) {
+    try {
+      const res = await fetch(path);
+      if (!res.ok) continue;
+      const lines = parseLyricSource(await res.text(), path);
+      if (lines.length) return lines;
+    } catch {
+      // try next candidate
+    }
+  }
+  return [];
+}
+
+/** Slight opening linger, then pace the rest evenly to the end. */
+function lyricWindowAtProgress(progress, n) {
+  if (n <= 0) return { index: 0, localT: 0 };
+  if (n === 1) return { index: 0, localT: clamp(progress, 0, 1) };
+  const p = clamp(progress, 0, 0.9999);
+  const firstHold = 0.1;
+  if (p < firstHold) {
+    return { index: 0, localT: firstHold > 0 ? p / firstHold : 1 };
+  }
+  const rest = (1 - firstHold) / (n - 1);
+  const u = p - firstHold;
+  const slot = clamp(Math.floor(u / Math.max(rest, 1e-6)), 0, n - 2);
+  const index = slot + 1;
+  const localT = clamp((u - slot * rest) / Math.max(rest, 1e-6), 0, 1);
+  return { index, localT };
+}
+
+function clearLyricBubbles() {
+  const stack = els.journeyLyrics;
+  if (stack) stack.replaceChildren();
+  lyricBubbleIndex = -1;
+  lyricBubbleEl = null;
+  lastLyricKey = "";
+}
+
+function trimLyricBubbles(max = 3) {
+  const stack = els.journeyLyrics;
+  if (!stack) return;
+  // Oldest is first in the DOM (sits highest); newest is last (sits at bottom)
+  while (stack.children.length > max) {
+    stack.removeChild(stack.firstElementChild);
+  }
+  const bubbles = [...stack.children];
+  bubbles.forEach((bubble, i) => {
+    bubble.classList.toggle("is-dim", i < bubbles.length - 1);
+  });
+}
+
+function ensureLyricBubble(index) {
+  const stack = els.journeyLyrics;
+  if (!stack) return null;
+  if (index === lyricBubbleIndex && lyricBubbleEl) return lyricBubbleEl;
+
+  // Scrolling backward: reset the thread so bubbles stay in order
+  if (lyricBubbleIndex >= 0 && index < lyricBubbleIndex) {
+    stack.replaceChildren();
+    lyricBubbleEl = null;
+  } else if (lyricBubbleEl) {
+    lyricBubbleEl.classList.remove("is-typing");
+    lyricBubbleEl.classList.add("is-dim");
+  }
+
+  const bubble = document.createElement("p");
+  bubble.className = "journey-lyric-bubble";
+  stack.appendChild(bubble);
+  // Pop-in on next frame
+  requestAnimationFrame(() => bubble.classList.add("is-in"));
+
+  lyricBubbleIndex = index;
+  lyricBubbleEl = bubble;
+  trimLyricBubbles(3);
+  return bubble;
+}
+
+/** Bottom-left chat bubbles; full lines pop in as you scroll. */
+function updateJourneyLyric(progress) {
+  const stack = els.journeyLyrics;
+  if (!stack) return;
+
+  const show =
+    viewMode === "elevation" &&
+    !introActive &&
+    lyricLines.length > 0 &&
+    progress > 0.004;
+
+  stack.classList.toggle("is-visible", show);
+
+  // Lag behind scroll so lines don't race past
+  const target = clamp(progress, 0, 1);
+  const lag = target >= smoothLyricProgress ? 0.035 : 0.07;
+  smoothLyricProgress += (target - smoothLyricProgress) * lag;
+
+  if (!show) {
+    if (lastLyricKey !== "") clearLyricBubbles();
+    if (!introActive && progress <= 0.004) smoothLyricProgress = 0;
+    return;
+  }
+
+  const n = lyricLines.length;
+  const { index } = lyricWindowAtProgress(smoothLyricProgress, n);
+  const line = (lyricLines[index] || "").trim();
+  if (!line) return;
+
+  const key = `${index}|${line}`;
+  if (key === lastLyricKey) return;
+  lastLyricKey = key;
+
+  const bubble = ensureLyricBubble(index);
+  if (!bubble) return;
+  bubble.classList.remove("is-typing");
+  bubble.textContent = line;
+}
+
 function trackSampleAtProgress(progress) {
   const track = data?.gpx?.track;
   if (!track?.length) return null;
@@ -1695,6 +1866,7 @@ function updateJourney(progress, clockSec = 0) {
 
   syncSoundPlayback(progress);
   applyJourneyAtmosphere(progress);
+  updateJourneyLyric(progress);
 
   const targetClose = closeW > 0 ? closeSum / closeW : smoothCloseness;
   // Snappier follow so weight tracks the scroll, not a slow average
@@ -1848,6 +2020,8 @@ function beginAtTimelineStart() {
   window.scrollTo(0, 0);
   scrollProgress = 0;
   smoothProgress = 0;
+  smoothLyricProgress = 0;
+  clearLyricBubbles();
   introActive = true;
   metaLabelsVisible = true;
   titleText = TITLE_FALLBACK;
@@ -1883,6 +2057,7 @@ function animate() {
     updateTimeline(clockSec);
   } else if (introActive) {
     updateOverview(clockSec);
+    updateJourneyLyric(0);
   } else {
     smoothProgress += (scrollProgress - smoothProgress) * 0.085;
     updateJourney(smoothProgress, clockSec);
@@ -1942,6 +2117,8 @@ async function boot() {
   } catch {
     captionsById = {};
   }
+
+  lyricLines = await loadLyricLines();
 
   await loadBrandFonts();
   initScene();
