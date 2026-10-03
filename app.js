@@ -37,12 +37,28 @@ const STEP_STRIDE_M = 0.75; // estimated hiking stride
 const TUNNEL_IMAGE_CAP = 40;
 const TUNNEL_GAP = 14;
 const TUNNEL_WORLD_SIZE = 20; // fixed world height for cavern planes
-const TUNNEL_ROLE_ORDER = ["background", "mid", "foreground"];
-const TUNNEL_ROLE_SCALE = {
-  background: 1.16,
-  mid: 1,
-  foreground: 0.88,
-};
+const WHEEL_IMAGE_CAP = 28;
+const WHEEL_CARD = 14; // half-extends from hub so cards cross at their centres
+const WHEEL_CAM_Z_DEFAULT = 78;
+const WHEEL_CAM_Z_NEAR = 26;
+const WHEEL_CAM_Z_FAR = 110;
+const WHEEL_IDLE_SPIN = 0.1; // rad/s — slow carousel drift
+const WHEEL_TIP = -0.38;
+const WHEEL_STACK_SIZE = 22; // shared frame size when layered into one image
+const WHEEL_STACK_Z = 0.04; // tiny depth offset so layers composite cleanly
+const _wheelRadial = new THREE.Vector3();
+const _wheelUp = new THREE.Vector3(0, 0, 1);
+const _wheelTangent = new THREE.Vector3();
+const _wheelBasis = new THREE.Matrix4();
+const _wheelQuatA = new THREE.Quaternion();
+const _wheelQuatB = new THREE.Quaternion();
+const _wheelPosA = new THREE.Vector3();
+const _wheelPosB = new THREE.Vector3();
+const _wheelScaleA = new THREE.Vector3();
+const _wheelScaleB = new THREE.Vector3();
+/** One threshold band per image (mid = subject cutout). */
+const TUNNEL_ROLE_FALLBACKS = ["mid", "foreground", "background"];
+const LAYER_BAKE_MAX_W = 768;
 
 let data = null;
 let renderer, scene, camera;
@@ -72,7 +88,7 @@ let lastLyricKey = "";
 let smoothLyricProgress = 0;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
-const VIEW_MODES = ["elevation", "timeline", "tunnel"];
+const VIEW_MODES = ["elevation", "timeline", "tunnel", "wheel"];
 let viewMode = "elevation";
 let timelineFocus = 0;
 let timelineFocusSmooth = 0;
@@ -82,6 +98,19 @@ let tunnelGroup = null;
 let tunnelPlanes = [];
 let tunnelProgress = 0;
 let smoothTunnelProgress = 0;
+let tunnelCamZ = 0;
+let tunnelBuildToken = 0;
+let wheelRoot = null;
+let wheelPivot = null;
+let wheelPlanes = [];
+let wheelAngle = 0;
+let wheelAngleTarget = 0;
+let wheelCamZ = WHEEL_CAM_Z_DEFAULT;
+let wheelCamZSmooth = WHEEL_CAM_Z_DEFAULT;
+let wheelBuildToken = 0;
+let wheelDrag = { active: false, x: 0, lastX: 0 };
+/** Press-and-hold: stack spinning blades into one layered image. */
+let wheelCluster = { active: false, t: 0, pointerId: null };
 let introActive = true;
 let overviewCenter = new THREE.Vector3();
 let overviewRadius = 400;
@@ -1094,10 +1123,10 @@ function estimateCloseness(gray, w, h) {
   return clamp(closeness, 0, 1);
 }
 
-async function getGrayBuffer(url) {
-  if (imageCache.has(url)) return imageCache.get(url);
+async function getGrayBuffer(url, { maxW = 320 } = {}) {
+  const cacheKey = `${url}|${maxW}`;
+  if (imageCache.has(cacheKey)) return imageCache.get(cacheKey);
   const img = await loadImageElement(url);
-  const maxW = 320;
   const scale = Math.min(1, maxW / img.naturalWidth);
   const w = Math.max(1, Math.round(img.naturalWidth * scale));
   const h = Math.max(1, Math.round(img.naturalHeight * scale));
@@ -1105,6 +1134,8 @@ async function getGrayBuffer(url) {
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   ctx.drawImage(img, 0, 0, w, h);
   const { data: pixels } = ctx.getImageData(0, 0, w, h);
   const gray = new Uint8ClampedArray(w * h);
@@ -1137,7 +1168,7 @@ async function getGrayBuffer(url) {
     human,
     sourceUrl: url,
   };
-  imageCache.set(url, entry);
+  imageCache.set(cacheKey, entry);
   return entry;
 }
 
@@ -1259,11 +1290,33 @@ function grayPercentile(gray, q) {
   return 255;
 }
 
+function smoothstep(edge0, edge1, x) {
+  const t = clamp((x - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** Membership 0..1 of a luminance value in a depth band, with optional edge feather. */
+function depthBandWeight(lum, role, cutA, cutB, feather = 0) {
+  const f = Math.max(0, feather);
+  if (role === "foreground") {
+    if (f <= 0) return lum <= cutA ? 1 : 0;
+    return 1 - smoothstep(cutA - f, cutA + f, lum);
+  }
+  if (role === "mid") {
+    if (f <= 0) return lum > cutA && lum <= cutB ? 1 : 0;
+    const enter = smoothstep(cutA - f, cutA + f, lum);
+    const leave = 1 - smoothstep(cutB - f, cutB + f, lum);
+    return enter * leave;
+  }
+  if (f <= 0) return lum > cutB ? 1 : 0;
+  return smoothstep(cutB - f, cutB + f, lum);
+}
+
 /**
  * Split each image into exactly 3 depth planes by luminance:
  * foreground (dark / near) · mid · background (light / far).
  */
-function buildDepthLayerCanvases(grayEntry) {
+function buildDepthLayerCanvases(grayEntry, { feather = 0 } = {}) {
   const { width: w, height: h } = grayEntry;
   const gray = grayEntry.stretched || grayEntry.gray;
   let cutA = grayEntry.cutA ?? grayPercentile(gray, 0.34);
@@ -1290,17 +1343,12 @@ function buildDepthLayerCanvases(grayEntry) {
     const out = img.data;
     const { r, g, b } = palette[role];
     for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-      const lum = gray[p];
-      let keep = false;
-      if (role === "foreground") keep = lum <= cutA;
-      else if (role === "mid") keep = lum > cutA && lum <= cutB;
-      else keep = lum > cutB;
-
-      if (keep) {
+      const weight = depthBandWeight(gray[p], role, cutA, cutB, feather);
+      if (weight > 0) {
         out[i] = r;
         out[i + 1] = g;
         out[i + 2] = b;
-        out[i + 3] = 255;
+        out[i + 3] = Math.round(255 * weight);
       } else {
         out[i + 3] = 0;
       }
@@ -1313,7 +1361,10 @@ function buildDepthLayerCanvases(grayEntry) {
 function canvasToTexture(canvas) {
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 2;
+  tex.anisotropy = 4;
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
   tex.needsUpdate = true;
   return tex;
 }
@@ -1623,6 +1674,7 @@ function setSelfieCardsVisible(visible) {
 function enterTimelineMode() {
   document.documentElement.style.overflow = "hidden";
   leaveTunnelMode();
+  leaveWheelMode();
   setHikeWorldVisible(false);
   setSelfieCardsVisible(true);
   for (const g of selfieInteractives) {
@@ -1687,17 +1739,7 @@ function enterSelfieMode() {
 function clearTunnelWorld() {
   if (!tunnelGroup) return;
   scene.remove(tunnelGroup);
-  tunnelGroup.traverse((obj) => {
-    // Tunnel planes share hike marker textures — don't dispose the maps
-    if (obj.material) {
-      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-      mats.forEach((m) => {
-        m.map = null;
-        m.dispose();
-      });
-    }
-    if (obj.geometry) obj.geometry.dispose();
-  });
+  tunnelGroup.traverse((obj) => disposeObject3D(obj));
   tunnelGroup = null;
   tunnelPlanes = [];
 }
@@ -1709,30 +1751,53 @@ function textureAspect(map) {
   return w / Math.max(h, 1e-6);
 }
 
-/** One transparent threshold band from a hike marker (shared texture map). */
-function tunnelPlaneFromLayer(srcPlane, group, role) {
-  const map = srcPlane?.material?.map;
-  if (!map) return null;
-  const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(1, 1),
-    new THREE.MeshBasicMaterial({
-      map,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      opacity: 1,
-      alphaTest: 0.04,
-    })
-  );
-  mesh.userData.item = group.userData.item;
-  mesh.userData.timeT = group.userData.timeT;
-  mesh.userData.depthRole = role;
-  mesh.userData.roleScale = TUNNEL_ROLE_SCALE[role] ?? 1;
-  mesh.userData.aspect = textureAspect(map);
-  return mesh;
+/** High-res threshold band (owned texture) for TUNNEL / WHEEL. */
+async function bakeThresholdLayerPlane(group, role) {
+  const item = group.userData.item;
+  const url = item?.thumb || item?.path;
+  if (!url) return null;
+  try {
+    const gray = await getGrayBuffer(url, { maxW: LAYER_BAKE_MAX_W });
+    // Narrow feather ≈ 1px AA at 768 — keeps cuts crisp without stair-steps
+    const feather = Math.max(1.2, gray.width / 420);
+    const layer = buildDepthLayerCanvases(gray, { feather }).find(
+      (entry) => entry.role === role
+    );
+    if (!layer) return null;
+    const tex = canvasToTexture(layer.canvas);
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({
+        map: tex,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        opacity: 1,
+        premultipliedAlpha: false,
+      })
+    );
+    mesh.userData.item = item;
+    mesh.userData.timeT = group.userData.timeT;
+    mesh.userData.depthRole = role;
+    mesh.userData.roleScale = 1;
+    mesh.userData.aspect = gray.width / Math.max(gray.height, 1);
+    mesh.userData.ownsMap = true;
+    return mesh;
+  } catch (err) {
+    console.warn("Layer bake failed", url, role, err);
+    return null;
+  }
 }
 
-function ensureTunnelBuilt({ force = false } = {}) {
+async function bakeOneLayerForMarker(group) {
+  for (const role of TUNNEL_ROLE_FALLBACKS) {
+    const mesh = await bakeThresholdLayerPlane(group, role);
+    if (mesh) return mesh;
+  }
+  return null;
+}
+
+async function ensureTunnelBuilt({ force = false } = {}) {
   if (!force && tunnelGroup && tunnelPlanes.length) return;
   clearTunnelWorld();
 
@@ -1748,33 +1813,240 @@ function ensureTunnelBuilt({ force = false } = {}) {
   tunnelGroup.visible = false;
   tunnelPlanes = [];
 
-  // For each image: travel background → mid → foreground (threshold cutouts)
-  picks.forEach((g) => {
-    const byRole = {};
-    for (const p of g.userData.planes || []) {
-      if (p.userData?.depthRole) byRole[p.userData.depthRole] = p;
-    }
-    for (const role of TUNNEL_ROLE_ORDER) {
-      const mesh = tunnelPlaneFromLayer(byRole[role], g, role);
-      if (!mesh) continue;
-      mesh.position.set(0, 0, -tunnelPlanes.length * TUNNEL_GAP);
-      mesh.userData.tunnelIndex = tunnelPlanes.length;
-      tunnelGroup.add(mesh);
-      tunnelPlanes.push(mesh);
-    }
-  });
+  // One threshold band per image (not all three depth roles)
+  for (const g of picks) {
+    const mesh = await bakeOneLayerForMarker(g);
+    if (!mesh) continue;
+    mesh.position.set(0, 0, -tunnelPlanes.length * TUNNEL_GAP);
+    mesh.userData.tunnelIndex = tunnelPlanes.length;
+    tunnelGroup.add(mesh);
+    tunnelPlanes.push(mesh);
+  }
 
   scene.add(tunnelGroup);
 }
 
-function enterTunnelMode() {
-  document.documentElement.style.overflow = "";
+function clearWheelWorld() {
+  if (!wheelRoot) return;
+  scene.remove(wheelRoot);
+  wheelRoot.traverse((obj) => disposeObject3D(obj));
+  wheelRoot = null;
+  wheelPivot = null;
+  wheelPlanes = [];
+}
+
+async function ensureWheelBuilt({ force = false } = {}) {
+  if (!force && wheelRoot && wheelPlanes.length) return;
+  clearWheelWorld();
+
+  const markers = interactives
+    .filter((g) => (g.userData.planes || []).length)
+    .sort((a, b) => a.userData.timeT - b.userData.timeT);
+  const picks =
+    markers.length <= WHEEL_IMAGE_CAP
+      ? markers
+      : spacePick(markers, WHEEL_IMAGE_CAP);
+
+  wheelRoot = new THREE.Group();
+  wheelRoot.visible = false;
+  // Tip so the upright radial cards read in depth
+  wheelRoot.rotation.x = WHEEL_TIP;
+
+  wheelPivot = new THREE.Group();
+  wheelRoot.add(wheelPivot);
+  wheelPlanes = [];
+
+  const n = picks.length;
+  for (let i = 0; i < n; i++) {
+    const mesh = await bakeOneLayerForMarker(picks[i]);
+    if (!mesh) continue;
+    const angle = (i / Math.max(n, 1)) * Math.PI * 2;
+    // Hub at each image's centre — upright blades, radial through the origin
+    mesh.position.set(0, 0, 0);
+    _wheelRadial.set(Math.cos(angle), Math.sin(angle), 0);
+    _wheelTangent.crossVectors(_wheelRadial, _wheelUp).normalize();
+    _wheelBasis.makeBasis(_wheelRadial, _wheelUp, _wheelTangent);
+    mesh.quaternion.setFromRotationMatrix(_wheelBasis);
+    const aspect = mesh.userData.aspect || 1;
+    mesh.scale.set(WHEEL_CARD * aspect, WHEEL_CARD, 1);
+    mesh.userData.wheelAngle = angle;
+    mesh.userData.wheelIndex = wheelPlanes.length;
+    wheelPivot.add(mesh);
+    wheelPlanes.push(mesh);
+  }
+
+  scene.add(wheelRoot);
+}
+
+async function enterWheelMode() {
+  const buildToken = ++wheelBuildToken;
+  document.documentElement.style.overflow = "hidden";
+  leaveTunnelMode();
   setHikeWorldVisible(false);
   setSelfieCardsVisible(false);
   if (selfieGroup) selfieGroup.visible = false;
   if (trackMesh) trackMesh.visible = false;
 
-  ensureTunnelBuilt({ force: true });
+  if (els.scrollHint) {
+    els.scrollHint.textContent = "BUILDING WHEEL…";
+    els.scrollHint.classList.remove("is-gone");
+    hintHidden = false;
+  }
+
+  await ensureWheelBuilt({ force: true });
+  if (buildToken !== wheelBuildToken) return;
+  if (wheelRoot) wheelRoot.visible = true;
+  document.documentElement.classList.add("is-wheeling");
+
+  if (scene?.fog) {
+    scene.fog.near = 20;
+    scene.fog.far = 160;
+    scene.fog.color.setRGB(0.08, 0.08, 0.09);
+  }
+  if (scene?.background) scene.background.setRGB(0.08, 0.08, 0.09);
+
+  wheelAngle = 0;
+  wheelAngleTarget = 0;
+  wheelCamZ = WHEEL_CAM_Z_DEFAULT;
+  wheelCamZSmooth = WHEEL_CAM_Z_DEFAULT;
+  wheelDrag.active = false;
+  wheelCluster.active = false;
+  wheelCluster.t = 0;
+  wheelCluster.pointerId = null;
+  document.documentElement.classList.remove("is-wheel-clustering");
+
+  if (els.scrollHint) {
+    els.scrollHint.textContent = wheelPlanes.length
+      ? "HOLD TO COMBINE · SCROLL TO ZOOM"
+      : "NO LAYERS FOUND";
+    els.scrollHint.classList.remove("is-gone");
+    hintHidden = false;
+  }
+  if (els.viewport) {
+    els.viewport.setAttribute("aria-label", "Spinning image wheel");
+  }
+}
+
+function leaveWheelMode() {
+  wheelBuildToken += 1;
+  wheelDrag.active = false;
+  wheelCluster.active = false;
+  wheelCluster.t = 0;
+  wheelCluster.pointerId = null;
+  document.documentElement.classList.remove("is-wheel-clustering");
+  if (wheelRoot) wheelRoot.visible = false;
+  document.documentElement.classList.remove("is-wheeling");
+}
+
+function wheelClusterCamZ() {
+  return clamp(WHEEL_STACK_SIZE * 2.35, WHEEL_CAM_Z_NEAR, WHEEL_CAM_Z_FAR);
+}
+
+function updateWheel(clockSec = 0) {
+  if (!camera || !wheelPivot || !wheelPlanes.length) return;
+  if (wheelRoot) wheelRoot.visible = true;
+
+  const clusterTarget = wheelCluster.active ? 1 : 0;
+  wheelCluster.t += (clusterTarget - wheelCluster.t) * 0.18;
+  const ct = smoothstep(0, 1, wheelCluster.t);
+
+  // Idle spin only while the blades are free
+  if (!wheelCluster.active && ct < 0.08 && !wheelDrag.active) {
+    wheelAngleTarget += WHEEL_IDLE_SPIN * (1 / 60);
+  }
+  if (!wheelCluster.active) {
+    wheelAngle += (wheelAngleTarget - wheelAngle) * 0.12;
+  }
+  // Freeze spin as the mosaic forms
+  wheelPivot.rotation.z = wheelAngle * (1 - ct);
+  wheelRoot.rotation.x = lerp(WHEEL_TIP, 0, ct);
+
+  wheelCamZSmooth += (wheelCamZ - wheelCamZSmooth) * 0.12;
+  const spinCamY = 1.2 + (wheelCamZSmooth - WHEEL_CAM_Z_NEAR) * 0.012;
+  const mosaicZ = wheelClusterCamZ();
+  const camZ = lerp(wheelCamZSmooth, mosaicZ, ct);
+  const camY = lerp(spinCamY, 0, ct);
+  _camPos.set(0, camY, camZ);
+  _look.set(0, 0, 0);
+  camera.position.lerp(_camPos, 0.18);
+  camera.lookAt(_look);
+
+  if (scene?.background) scene.background.setRGB(0.08, 0.08, 0.09);
+  if (scene?.fog) {
+    scene.fog.color.setRGB(0.08, 0.08, 0.09);
+    scene.fog.near = Math.max(4, camZ * 0.22);
+    scene.fog.far = Math.max(48, camZ * 2.1);
+  }
+
+  const nStack = Math.max(wheelPlanes.length, 1);
+  let activeItem = null;
+  let best = -Infinity;
+  for (const mesh of wheelPlanes) {
+    const angle = mesh.userData.wheelAngle;
+    const aspect = mesh.userData.aspect || 1;
+    const stackIdx =
+      mesh.userData.stackOrder ?? mesh.userData.wheelIndex ?? 0;
+
+    // Spin pose — radial upright blade through the hub
+    _wheelPosA.set(0, 0, 0);
+    _wheelRadial.set(Math.cos(angle), Math.sin(angle), 0);
+    _wheelTangent.crossVectors(_wheelRadial, _wheelUp).normalize();
+    _wheelBasis.makeBasis(_wheelRadial, _wheelUp, _wheelTangent);
+    _wheelQuatA.setFromRotationMatrix(_wheelBasis);
+    _wheelScaleA.set(WHEEL_CARD * aspect, WHEEL_CARD, 1);
+
+    // Hold pose — every silhouette shares one frame, stacked as one image
+    _wheelPosB.set(0, 0, (stackIdx - (nStack - 1) / 2) * WHEEL_STACK_Z);
+    _wheelQuatB.identity();
+    const stack =
+      aspect >= 1
+        ? { w: WHEEL_STACK_SIZE, h: WHEEL_STACK_SIZE / aspect }
+        : { w: WHEEL_STACK_SIZE * aspect, h: WHEEL_STACK_SIZE };
+    _wheelScaleB.set(stack.w, stack.h, 1);
+
+    mesh.position.lerpVectors(_wheelPosA, _wheelPosB, ct);
+    mesh.quaternion.slerpQuaternions(_wheelQuatA, _wheelQuatB, ct);
+    mesh.scale.lerpVectors(_wheelScaleA, _wheelScaleB, ct);
+    mesh.renderOrder = ct > 0.02 ? stackIdx : 0;
+
+    // Shared alpha so transparent cutouts blend into one composite
+    if (mesh.material) {
+      mesh.material.opacity = lerp(1, 0.78, ct);
+      mesh.material.transparent = true;
+      mesh.material.depthWrite = false;
+    }
+
+    const worldAngle = angle + wheelAngle;
+    const facing = -Math.cos(worldAngle);
+    if (facing > best) {
+      best = facing;
+      activeItem = mesh.userData.item;
+    }
+  }
+
+  const progress =
+    activeItem?.ts != null ? timeNormTs(activeItem.ts) : smoothProgress;
+  updateCornerMeta(clamp(progress, 0, 1), activeItem);
+  setBrandWeightFromCloseness(0.5, captionForItem(activeItem));
+}
+
+async function enterTunnelMode() {
+  const buildToken = ++tunnelBuildToken;
+  document.documentElement.style.overflow = "";
+  leaveWheelMode();
+  setHikeWorldVisible(false);
+  setSelfieCardsVisible(false);
+  if (selfieGroup) selfieGroup.visible = false;
+  if (trackMesh) trackMesh.visible = false;
+
+  if (els.scrollHint) {
+    els.scrollHint.textContent = "BUILDING TUNNEL…";
+    els.scrollHint.classList.remove("is-gone");
+    hintHidden = false;
+  }
+
+  await ensureTunnelBuilt({ force: true });
+  if (buildToken !== tunnelBuildToken) return;
   if (tunnelGroup) tunnelGroup.visible = true;
   document.documentElement.classList.add("is-tunneling");
 
@@ -1785,12 +2057,14 @@ function enterTunnelMode() {
   }
   if (scene?.background) scene.background.setRGB(0.07, 0.07, 0.08);
 
-  const vh = Math.max(640, tunnelPlanes.length * 36);
+  // Extra scroll length so each layer can hold in full view before the next
+  const vh = Math.max(720, tunnelPlanes.length * 70);
   if (els.scrollRail) els.scrollRail.style.height = `${vh}vh`;
 
   window.scrollTo(0, 0);
   tunnelProgress = 0;
   smoothTunnelProgress = 0;
+  tunnelCamZ = TUNNEL_GAP * 2.2;
   scrollProgress = 0;
   smoothProgress = 0;
 
@@ -1807,6 +2081,7 @@ function enterTunnelMode() {
 }
 
 function leaveTunnelMode() {
+  tunnelBuildToken += 1;
   if (tunnelGroup) tunnelGroup.visible = false;
   if (els.scrollRail) els.scrollRail.style.height = "";
   document.documentElement.classList.remove("is-tunneling");
@@ -1815,6 +2090,7 @@ function leaveTunnelMode() {
 function enterElevationMode() {
   document.documentElement.style.overflow = "";
   leaveTunnelMode();
+  leaveWheelMode();
   if (selfieGroup) selfieGroup.visible = false;
   setSelfieCardsVisible(false);
   restoreHikeLayout();
@@ -1842,6 +2118,7 @@ function updateModeToggle() {
     elevation: "THE HIKE",
     timeline: "SELFIES",
     tunnel: "TUNNEL",
+    wheel: "WHEEL",
   };
   const next = VIEW_MODES[(VIEW_MODES.indexOf(viewMode) + 1) % VIEW_MODES.length];
   els.modeToggle.textContent = labels[viewMode] || "THE HIKE";
@@ -1855,16 +2132,17 @@ function updateModeToggle() {
   );
 }
 
-function setViewMode(mode) {
+async function setViewMode(mode) {
   if (!VIEW_MODES.includes(mode) || mode === viewMode) return;
   if (introActive) endIntro({ keepHint: true });
   endInspect();
 
   if (viewMode === "elevation") savedScrollY = window.scrollY;
-  if (viewMode === "timeline") {
+  if (viewMode === "timeline" || viewMode === "wheel") {
     document.documentElement.style.overflow = "";
   }
   if (viewMode === "tunnel") leaveTunnelMode();
+  if (viewMode === "wheel") leaveWheelMode();
 
   viewMode = mode;
   els.experience?.setAttribute("data-mode", mode);
@@ -1872,16 +2150,36 @@ function setViewMode(mode) {
   // Hide the flat selfie board — SELFIES mode is the timeline rolodex
   if (selfieGroup) selfieGroup.visible = false;
 
-  if (mode === "timeline") enterTimelineMode();
-  else if (mode === "tunnel") enterTunnelMode();
-  else enterElevationMode();
+  try {
+    if (mode === "timeline") enterTimelineMode();
+    else if (mode === "tunnel") await enterTunnelMode();
+    else if (mode === "wheel") await enterWheelMode();
+    else enterElevationMode();
+  } catch (err) {
+    console.error("View mode switch failed", mode, err);
+    if (mode === "tunnel") {
+      leaveTunnelMode();
+      if (els.scrollHint) {
+        els.scrollHint.textContent = "TUNNEL FAILED TO LOAD";
+        els.scrollHint.classList.remove("is-gone");
+        hintHidden = false;
+      }
+    } else if (mode === "wheel") {
+      leaveWheelMode();
+      if (els.scrollHint) {
+        els.scrollHint.textContent = "WHEEL FAILED TO LOAD";
+        els.scrollHint.classList.remove("is-gone");
+        hintHidden = false;
+      }
+    }
+  }
 
   updateModeToggle();
 }
 
 function toggleViewMode() {
   const next = VIEW_MODES[(VIEW_MODES.indexOf(viewMode) + 1) % VIEW_MODES.length];
-  setViewMode(next);
+  void setViewMode(next);
 }
 
 function activeInspectMarkers() {
@@ -2107,10 +2405,76 @@ function updateInspectFrame() {
   setBrandWeightFromCloseness(0.72, captionForItem(item));
 }
 
+/** Fresh draw order each hold so the stacked composite changes. */
+function shuffleWheelStackOrder() {
+  const n = wheelPlanes.length;
+  const order = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = order[i];
+    order[i] = order[j];
+    order[j] = tmp;
+  }
+  for (let i = 0; i < n; i++) {
+    wheelPlanes[i].userData.stackOrder = order[i];
+  }
+}
+
+function beginWheelCluster(pointerId = null) {
+  if (viewMode !== "wheel" || !wheelPlanes.length) return;
+  shuffleWheelStackOrder();
+  wheelCluster.active = true;
+  wheelCluster.pointerId = pointerId;
+  wheelDrag.active = false;
+  document.documentElement.classList.add("is-wheel-clustering");
+  if (!hintHidden) hideHint();
+  ensureAudioCtx();
+}
+
+function endWheelCluster(pointerId = null) {
+  if (
+    pointerId != null &&
+    wheelCluster.pointerId != null &&
+    pointerId !== wheelCluster.pointerId
+  ) {
+    return;
+  }
+  wheelCluster.active = false;
+  wheelCluster.pointerId = null;
+  document.documentElement.classList.remove("is-wheel-clustering");
+}
+
+function onWheelPointerDown(e) {
+  if (viewMode !== "wheel" || (e.button != null && e.button !== 0)) return;
+  e.preventDefault();
+  try {
+    els.viewport?.setPointerCapture?.(e.pointerId);
+  } catch {
+    /* ignore */
+  }
+  beginWheelCluster(e.pointerId);
+}
+
+function onWheelPointerMove(e) {
+  // Reserved — hold clusters; spin is idle-only while free
+  void e;
+}
+
+function onWheelPointerUp(e) {
+  if (!wheelCluster.active && !wheelDrag.active) return;
+  wheelDrag.active = false;
+  try {
+    els.viewport?.releasePointerCapture?.(e.pointerId);
+  } catch {
+    /* ignore */
+  }
+  endWheelCluster(e.pointerId);
+}
+
 function onInspectPointerDown(e) {
   if (e.button != null && e.button !== 0) return;
   if (inspectHold.active) return;
-  if (viewMode === "tunnel") return;
+  if (viewMode === "tunnel" || viewMode === "wheel") return;
   const group = pickMarkerAt(e.clientX, e.clientY);
   if (!group) return;
   e.preventDefault();
@@ -2173,6 +2537,19 @@ function onViewportWheel(e) {
   }
   if (viewMode === "timeline") {
     onTimelineWheel(e);
+    return;
+  }
+  if (viewMode === "wheel") {
+    e.preventDefault();
+    if (wheelCluster.active) return;
+    // Scroll up / pinch → closer to the hub
+    wheelCamZ = clamp(
+      wheelCamZ + e.deltaY * 0.045,
+      WHEEL_CAM_Z_NEAR,
+      WHEEL_CAM_Z_FAR
+    );
+    if (!hintHidden) hideHint();
+    ensureAudioCtx();
     return;
   }
   // Viewport captures pointer events — forward scroll for hike + tunnel
@@ -2249,32 +2626,48 @@ function updateSelfies(clockSec = 0) {
   applyJourneyAtmosphere(0.5);
 }
 
+/** Scroll → layer index with a long dwell on each (notification beat), then ease to next. */
+function tunnelSteppedFocus(progress, count) {
+  if (count <= 1) return 0;
+  const hold = 0.74; // most of each step stays parked on one layer
+  const spans = count - 1;
+  const p = clamp(progress, 0, 1);
+  if (p >= 0.999) return spans;
+  const x = p * spans;
+  const i = Math.min(Math.floor(x), spans - 1);
+  const f = x - i;
+  if (f <= hold) return i;
+  const u = (f - hold) / Math.max(1 - hold, 1e-6);
+  return i + u * u * (3 - 2 * u);
+}
+
 function updateTunnel() {
   if (!camera || !tunnelPlanes.length) return;
   if (tunnelGroup) tunnelGroup.visible = true;
 
   tunnelProgress = readScrollProgress();
-  smoothTunnelProgress += (tunnelProgress - smoothTunnelProgress) * 0.055;
+  smoothTunnelProgress += (tunnelProgress - smoothTunnelProgress) * 0.08;
 
   const n = tunnelPlanes.length;
-  // Drift forward through fixed planes — perspective grows each layer like a cavern
-  const startZ = TUNNEL_GAP * 2.2;
-  const endZ = -((n - 1) * TUNNEL_GAP) - TUNNEL_GAP * 1.4;
-  const camZ = lerp(startZ, endZ, smoothTunnelProgress);
+  const focus = tunnelSteppedFocus(smoothTunnelProgress, n);
+  const focusIdx = Math.round(focus);
 
-  camera.position.set(0, 0, camZ);
-  camera.lookAt(0, 0, camZ - 60);
+  // Park the camera so the focused layer sits in full view, then ease between parks
+  const viewDist = TUNNEL_GAP * 1.45;
+  const targetCamZ = -focus * TUNNEL_GAP + viewDist;
+  tunnelCamZ += (targetCamZ - tunnelCamZ) * 0.1;
+  camera.position.set(0, 0, tunnelCamZ);
+  camera.lookAt(0, 0, tunnelCamZ - 60);
 
-  // Keep fog in the cavern register (journey atmosphere would bleach it white)
   if (scene?.background) scene.background.setRGB(0.07, 0.07, 0.08);
   if (scene?.fog) {
     scene.fog.color.setRGB(0.07, 0.07, 0.08);
-    scene.fog.near = 6;
-    scene.fog.far = 48;
+    scene.fog.near = 5;
+    scene.fog.far = 42;
   }
 
   let activeItem = null;
-  let bestAhead = Infinity;
+  let bestBuild = -1;
 
   for (let i = 0; i < n; i++) {
     const mesh = tunnelPlanes[i];
@@ -2282,38 +2675,44 @@ function updateTunnel() {
     mesh.position.set(0, 0, planeZ);
     mesh.rotation.set(0, 0, 0);
 
-    const ahead = camZ - planeZ; // distance still in front of the lens
-    if (ahead < 0.25 || ahead > TUNNEL_GAP * 9) {
+    const ahead = tunnelCamZ - planeZ;
+    const distFocus = Math.abs(i - focus);
+    if (distFocus > 3.2 || ahead < 0.2) {
       mesh.visible = false;
       continue;
     }
     mesh.visible = true;
 
-    // Fixed world size + aspect — camera motion supplies the zoom
+    // Notification build: 0 at neighbors → 1 when this layer is the focus
+    const proximity = clamp(1 - distFocus, 0, 1);
+    const appear = proximity * proximity * (3 - 2 * proximity);
+    // Incoming layers ease up from smaller; settled focus holds full frame
+    const sizeMul = lerp(0.48, 1.02, appear);
+
     const roleScale = mesh.userData.roleScale ?? 1;
     const aspect = mesh.userData.aspect || 1;
     const h = TUNNEL_WORLD_SIZE * roleScale;
     const w = h * aspect;
-    mesh.scale.set(w, h, 1);
+    mesh.scale.set(w * sizeMul, h * sizeMul, 1);
 
-    // Only soften right as you pass through a cutout; otherwise hold solid
-    const pass = ahead < TUNNEL_GAP * 0.85 ? clamp(ahead / (TUNNEL_GAP * 0.55), 0, 1) : 1;
-    const depthDim = clamp(1.05 - ahead / (TUNNEL_GAP * 8), 0.55, 1);
-    if (mesh.material) mesh.material.opacity = pass * depthDim;
+    if (mesh.material) mesh.material.opacity = 1;
 
-    if (ahead < bestAhead) {
-      bestAhead = ahead;
+    if (appear > bestBuild) {
+      bestBuild = appear;
       activeItem = mesh.userData.item;
     }
   }
 
   const progress = clamp(smoothTunnelProgress, 0, 1);
-  updateCornerMeta(progress, activeItem);
+  updateCornerMeta(progress, activeItem || tunnelPlanes[focusIdx]?.userData?.item);
   syncSoundPlayback(progress);
 
-  const close = bestAhead < TUNNEL_GAP * 1.2 ? 0.64 : 0.36;
+  const close = bestBuild > 0.85 ? 0.66 : 0.34;
   smoothCloseness += (close - smoothCloseness) * 0.12;
-  setBrandWeightFromCloseness(smoothCloseness, captionForItem(activeItem));
+  setBrandWeightFromCloseness(
+    smoothCloseness,
+    captionForItem(activeItem || tunnelPlanes[focusIdx]?.userData?.item)
+  );
 
   if (!hintHidden && smoothTunnelProgress > 0.02) hideHint();
 }
@@ -2994,6 +3393,8 @@ function animate() {
     updateTimeline(clockSec);
   } else if (viewMode === "tunnel") {
     updateTunnel();
+  } else if (viewMode === "wheel") {
+    updateWheel(clockSec);
   } else if (inspectHold.active) {
     if (introActive) {
       updateOverview(clockSec);
@@ -3060,11 +3461,26 @@ function bindModeControls() {
   els.viewport?.addEventListener("pointermove", onTimelinePointer, {
     passive: true,
   });
+  els.viewport?.addEventListener("pointermove", onWheelPointerMove, {
+    passive: true,
+  });
   els.viewport?.addEventListener("wheel", onViewportWheel, { passive: false });
-  els.viewport?.addEventListener("pointerdown", onInspectPointerDown);
-  window.addEventListener("pointerup", onInspectPointerUp);
-  window.addEventListener("pointercancel", onInspectPointerUp);
-  window.addEventListener("blur", endInspect);
+  els.viewport?.addEventListener("pointerdown", (e) => {
+    if (viewMode === "wheel") onWheelPointerDown(e);
+    else onInspectPointerDown(e);
+  });
+  window.addEventListener("pointerup", (e) => {
+    onWheelPointerUp(e);
+    onInspectPointerUp(e);
+  });
+  window.addEventListener("pointercancel", (e) => {
+    onWheelPointerUp(e);
+    onInspectPointerUp(e);
+  });
+  window.addEventListener("blur", () => {
+    endWheelCluster();
+    endInspect();
+  });
 }
 
 async function boot() {

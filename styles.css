@@ -96,6 +96,24 @@ html.is-tunneling .scroll-hint {
   color: #d0d0d0;
 }
 
+html.is-wheeling,
+html.is-wheeling body {
+  background: #141416;
+  color: #e8e8e8;
+}
+
+html.is-wheeling .mode-toggle,
+html.is-wheeling .mode-toggle[aria-pressed="true"],
+html.is-wheeling .meta-chip {
+  color: #d4d4d4;
+}
+
+html.is-wheeling .scroll-hint {
+  background: rgba(20, 20, 22, 0.9);
+  border-color: #333338;
+  color: #d0d0d0;
+}
+
 .experience {
   position: relative;
 }
@@ -141,6 +159,15 @@ html.is-tunneling .scroll-hint {
   cursor: ns-resize;
 }
 
+.experience[data-mode="wheel"] .viewport {
+  cursor: grab;
+}
+
+.experience[data-mode="wheel"] .viewport:active,
+html.is-wheel-clustering .experience[data-mode="wheel"] .viewport {
+  cursor: grabbing;
+}
+
 .experience[data-inspect="true"] .viewport {
   cursor: grabbing;
 }
@@ -166,6 +193,10 @@ html.is-tunneling .scroll-hint {
 .experience[data-mode="tunnel"] .scroll-rail {
   /* height set inline from plane count */
   pointer-events: none;
+}
+
+.experience[data-mode="wheel"] .scroll-rail {
+  height: 0;
 }
 
 .mode-toggle {
@@ -307,7 +338,8 @@ html.is-inspecting .journey-lyric-bubble {
 }
 
 .experience[data-mode="timeline"] .journey-lyrics,
-.experience[data-mode="tunnel"] .journey-lyrics {
+.experience[data-mode="tunnel"] .journey-lyrics,
+.experience[data-mode="wheel"] .journey-lyrics {
   opacity: 0;
 }
 
@@ -358,13 +390,15 @@ html.is-inspecting .journey-lyric-bubble {
 }
 
 .experience[data-mode="timeline"] .scroll-hint,
-.experience[data-mode="tunnel"] .scroll-hint {
+.experience[data-mode="tunnel"] .scroll-hint,
+.experience[data-mode="wheel"] .scroll-hint {
   opacity: 1;
   transform: translateX(-50%);
 }
 
 .experience[data-mode="timeline"] .scroll-hint.is-gone,
-.experience[data-mode="tunnel"] .scroll-hint.is-gone {
+.experience[data-mode="tunnel"] .scroll-hint.is-gone,
+.experience[data-mode="wheel"] .scroll-hint.is-gone {
   opacity: 0;
   transform: translateX(-50%) translateY(0.5rem);
 }
