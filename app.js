@@ -39,7 +39,7 @@ const TUNNEL_GAP = 14;
 const TUNNEL_WORLD_SIZE = 20; // fixed world height for cavern planes
 const LAYER_IMAGE_CAP = 36;
 const WHEEL_CARD = 14; // half-extends from hub so cards cross at their centres
-const WHEEL_CAM_Z_BOOK = 58; // rolodex reading distance
+const WHEEL_CAM_Z_BOOK = 62; // landscape rolodex reading distance
 const WHEEL_CAM_Z_CROSS = 78; // radial cross-section viewing distance
 const WHEEL_CAM_Z_NEAR = 26;
 const WHEEL_CAM_Z_FAR = 110;
@@ -47,10 +47,11 @@ const WHEEL_IDLE_SPIN = 0.08; // rad/s — slow drift in cross-section
 const WHEEL_TIP = -0.38;
 const WHEEL_STACK_SIZE = 22; // shared frame size when layered into one image
 const WHEEL_STACK_Z = 0.04; // tiny depth offset so layers composite cleanly
-const BOOK_PAGE_SIZE = 16; // card size in the scroll rolodex
-/** Scroll layout — rolodex: cards hinged on a shared bottom edge. */
-const ROLODEX_STEP = 0.58; // rad between cards around the spindle
+const BOOK_PAGE_SIZE = 14; // short side of landscape scroll cards
+/** Scroll layout — landscape rolodex: cards hinged on a shared left edge. */
+const ROLODEX_STEP = 0.52; // rad between cards around the vertical spindle
 const ROLODEX_VISIBLE = 5;
+const ROLODEX_LANDSCAPE = 1.55; // width/height for the scroll card frame
 const WHEEL_HOLD_MS = 240; // still press → collage; drag before this → cross-section
 const WHEEL_DRAG_PX = 9;
 const GALLERY_RADIUS = 40;
@@ -99,15 +100,17 @@ let audioUnlocked = false;
 let lastTitleKey = "";
 let titleText = TITLE_FALLBACK;
 let captionsById = {};
+/** iPhone Screen Time day stats (from assets/hike-1/screentime). */
+let screentimeData = null;
 let lyricLines = [];
 let lastLyricKey = "";
 let smoothLyricProgress = 0;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
-/** Single experience views: path journey, zoomed-out gallery, combined wheel. */
-const EXPERIENCE_VIEWS = ["path", "zoom", "combine"];
+/** Single experience views: path journey, off-timeline outliers, combined wheel. */
+const EXPERIENCE_VIEWS = ["path", "outliers", "combine"];
 let experienceView = "path";
-/** Legacy flags kept in sync for path/zoom/combine branches. */
+/** Legacy flags kept in sync for path/outliers/combine branches. */
 let viewMode = "elevation"; // "elevation" | "wheel"
 let hikeArrangement = "path"; // "gallery" | "path"
 let timelineFocus = 0;
@@ -130,7 +133,7 @@ let galleryPitchTarget = 0.18;
 let galleryCamZ = GALLERY_CAM_Z_DEFAULT;
 let galleryCamZSmooth = GALLERY_CAM_Z_DEFAULT;
 let galleryDrag = { active: false, x: 0, y: 0, lastX: 0, lastY: 0 };
-/** Normalized cursor in zoom-out; drives threshold brightness / hardness. */
+/** Normalized cursor in OUTLIERS; drives threshold brightness / hardness. */
 let galleryPointer = { nx: 0.5, ny: 0.5 };
 let galleryThreshold = { bright: 1, intensity: 0.55 };
 let wheelRoot = null;
@@ -159,6 +162,9 @@ let wheelPageVel = 0;
 /** 0 = book pages (scroll), 1 = radial cross-section (drag). */
 let combineCrossTarget = 0;
 let combineCrossT = 0;
+/** Last scroll time — after idle, COMBINE returns to drag cross-section. */
+let wheelScrollAt = 0;
+const WHEEL_SCROLL_RETURN_MS = 650;
 /** Cursor in COMBINE — drives contrasting backdrop from sampled layer colour. */
 let combinePointer = { nx: 0.5, ny: 0.5, active: false };
 let combineBgSmooth = { r: 0.08, g: 0.08, b: 0.09 };
@@ -487,6 +493,213 @@ function isUuidPortraitName(name = "") {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpe?g|heic|png)$/i.test(
     name
   );
+}
+
+/** Screenshots / share-sheet stills (PNG, Screenshot*, iOS UUID filenames). */
+function isScreenshotItem(item) {
+  const name = (item?.name || item?.path || "").split("/").pop() || "";
+  if (!name) return false;
+  if (/^screenshot/i.test(name)) return true;
+  if (/\.png$/i.test(name)) return true;
+  return isUuidPortraitName(name);
+}
+
+/** Off the path timeline: not on-track, outside GPX time, or a screenshot. */
+function isOutlierMedia(item, gpx = data?.gpx) {
+  if (!item?.thumb) return false;
+  if (item.kind !== "image" && item.kind !== "video") return false;
+  if (!item.onTrack) return true;
+  if (isScreenshotItem(item)) return true;
+  if (gpx && item.ts != null) {
+    if (item.ts < gpx.startTs || item.ts > gpx.endTs) return true;
+  }
+  return false;
+}
+
+/** Synthetic media rows for the Screen Time PNGs (not in timeline.json). */
+function screentimeAssetItems() {
+  const day = screentimeData?.date || data?.gpx?.start?.slice(0, 10) || "2026-10-02";
+  const baseTs = data?.gpx?.endTs ?? Date.parse(`${day}T20:00:00Z`) / 1000;
+  return [
+    {
+      id: "screentime-overview",
+      name: "IMG_4403.PNG",
+      path: "assets/hike-1/screentime/IMG_4403.PNG",
+      thumb: "assets/hike-1/screentime/IMG_4403.PNG",
+      kind: "image",
+      source: "screentime",
+      onTrack: false,
+      screentimeMatch: "screentime-overview",
+      time: `${day}T13:27:00Z`,
+      ts: baseTs + 60,
+    },
+    {
+      id: "screentime-pickups",
+      name: "IMG_4404.PNG",
+      path: "assets/hike-1/screentime/IMG_4404.PNG",
+      thumb: "assets/hike-1/screentime/IMG_4404.PNG",
+      kind: "image",
+      source: "screentime",
+      onTrack: false,
+      screentimeMatch: "screentime-pickups",
+      time: `${day}T13:28:00Z`,
+      ts: baseTs + 120,
+    },
+  ];
+}
+
+/** Local hour for an outlier still (Screen Time charts are device-local). */
+function outlierLocalHour(item) {
+  const offset = screentimeData?.tzOffsetHours ?? 2;
+  if (item?.ts != null && Number.isFinite(item.ts)) {
+    return Math.floor(((item.ts / 3600 + offset) % 24 + 24) % 24);
+  }
+  const iso = item?.time;
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  return Math.floor(((ms / 3600000 + offset) % 24 + 24) % 24);
+}
+
+function defaultScreentimeMoment() {
+  const t = screentimeData?.totals;
+  return (
+    screentimeData?.moments?.find((m) => m.id === "day-total") || {
+      id: "day-total",
+      title: t?.screenTime
+        ? `${t.screenTime} of screen time`
+        : "screen time outlier",
+      eyebrow: "screen time",
+      stat: t?.pickups != null ? `${t.pickups} pick-ups` : "",
+      detail: t?.firstPickup ? `first unlock ${t.firstPickup}` : "",
+    }
+  );
+}
+
+/** Bind an outlier still to a Screen Time datapoint for title + corner copy. */
+function screentimeMomentForItem(item) {
+  const moments = screentimeData?.moments || [];
+  if (!moments.length) return defaultScreentimeMoment();
+
+  const matchKey = item?.screentimeMatch;
+  if (matchKey) {
+    const hit = moments.find((m) => m.match === matchKey);
+    if (hit) return hit;
+  }
+
+  const path = item?.path || "";
+  if (path.includes("/screentime/IMG_4404")) {
+    return moments.find((m) => m.id === "pickups-total") || moments[0];
+  }
+  if (path.includes("/screentime/IMG_4403")) {
+    return moments.find((m) => m.id === "day-total") || moments[0];
+  }
+
+  const hour = outlierLocalHour(item);
+  if (hour != null) {
+    const byHour = moments.find(
+      (m) => Array.isArray(m.hours) && m.hours.includes(hour)
+    );
+    if (byHour) return byHour;
+  }
+
+  // Screenshots / UUID stills lean social; ricoh leans maps / creativity
+  if (item?.source === "ricoh") {
+    return (
+      moments.find((m) => m.id === "midmorning-maps") ||
+      moments.find((m) => m.id === "midday-creativity") ||
+      defaultScreentimeMoment()
+    );
+  }
+  if (isScreenshotItem(item)) {
+    return (
+      moments.find((m) => m.id === "evening-social") || defaultScreentimeMoment()
+    );
+  }
+  return defaultScreentimeMoment();
+}
+
+function screentimeCaptionForItem(item) {
+  const moment = item?.screentimeMoment || screentimeMomentForItem(item);
+  return String(moment?.title || TITLE_FALLBACK).toLowerCase();
+}
+
+function updateOutlierCornerMeta(item) {
+  const moment = item?.screentimeMoment || screentimeMomentForItem(item);
+  const totals = screentimeData?.totals || {};
+  const app = (screentimeData?.apps || []).find((a) => a.name === moment?.app);
+
+  if (els.metaTime) {
+    els.metaTime.textContent = (moment?.eyebrow || "screen time").toUpperCase();
+  }
+  if (els.metaAltitude) {
+    els.metaAltitude.textContent = (
+      moment?.stat ||
+      (totals.screenTime ? `screen time ${totals.screenTime}` : "screen time")
+    ).toUpperCase();
+  }
+  if (els.metaLocation) {
+    els.metaLocation.textContent = (
+      moment?.detail ||
+      (totals.firstPickup ? `first pick-up ${totals.firstPickup}` : "pick-ups")
+    ).toUpperCase();
+  }
+  if (els.metaSteps) {
+    if (app?.firstUsed != null) {
+      els.metaSteps.textContent = `${app.firstUsed} FIRST OPENS`;
+    } else if (totals.pickups != null) {
+      els.metaSteps.textContent = `${totals.pickups} PICK-UPS`;
+    } else {
+      els.metaSteps.textContent = "PICK-UPS";
+    }
+  }
+}
+
+/** Sample off-timeline stills for OUTLIERS — keep screenshots + Screen Time PNGs. */
+function pickOutlierMedia(cap = LAYER_IMAGE_CAP) {
+  const gpx = data?.gpx;
+  const pool = [...screentimeAssetItems(), ...(data?.media || [])]
+    .filter((m) => isOutlierMedia(m, gpx))
+    .sort((a, b) => (a.ts || 0) - (b.ts || 0));
+
+  // Always pin the Screen Time source stills into the cloud
+  const pinned = pool.filter((m) => m.source === "screentime");
+  const restPool = pool.filter((m) => m.source !== "screentime");
+  const restCap = Math.max(0, cap - pinned.length);
+
+  let rest = restPool;
+  if (restPool.length > restCap) {
+    const shots = restPool.filter(isScreenshotItem);
+    const photos = restPool.filter((m) => !isScreenshotItem(m));
+    const shotCap = Math.min(shots.length, Math.max(6, Math.floor(restCap * 0.28)));
+    const photoCap = Math.max(0, restCap - Math.min(shots.length, shotCap));
+    rest = [
+      ...spacePick(shots, Math.min(shots.length, shotCap)),
+      ...spacePick(photos, photoCap),
+    ];
+  }
+
+  const seen = new Set();
+  const unique = [];
+  for (const m of [...pinned, ...rest]) {
+    if (!m?.path || seen.has(m.path)) continue;
+    seen.add(m.path);
+    const moment = screentimeMomentForItem(m);
+    unique.push({ ...m, screentimeMoment: moment });
+  }
+  return unique.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+}
+
+function outlierBakeStub(item) {
+  return {
+    userData: {
+      item,
+      timeT:
+        item?.ts != null && data?.gpx
+          ? timeNormTs(item.ts)
+          : 0.5,
+    },
+  };
 }
 
 /** Named selfie / portrait exports (combined_ dual-cam thumbs are often undecodable). */
@@ -1912,14 +2125,15 @@ async function ensureGalleryBuilt({ force = false } = {}) {
   if (!force && galleryRoot && galleryPlanes.length) return;
   clearGalleryWorld();
 
-  const picks = pickLayerMarkers(LAYER_IMAGE_CAP);
+  // OUTLIERS cloud — off-timeline / off-path stills, including screenshots
+  const picks = pickOutlierMedia(LAYER_IMAGE_CAP);
   galleryRoot = new THREE.Group();
   galleryRoot.visible = false;
   galleryPlanes = [];
 
   const n = picks.length;
   for (let i = 0; i < n; i++) {
-    const mesh = await bakeOneLayerForMarker(picks[i]);
+    const mesh = await bakeOneLayerForMarker(outlierBakeStub(picks[i]));
     if (!mesh) continue;
     const pos = fibonacciSphere(galleryPlanes.length, Math.max(n, 1), GALLERY_RADIUS);
     mesh.userData.galleryPos = pos.clone();
@@ -2041,10 +2255,17 @@ function updateGallery(clockSec = 0) {
     applyGalleryThresholdLook(mesh, bright, clamp(intensity, 0, 1));
   }
 
-  const progress =
-    activeItem?.ts != null ? timeNormTs(activeItem.ts) : smoothProgress;
-  updateCornerMeta(clamp(progress, 0, 1), activeItem);
-  setBrandWeightFromCloseness(0.48, captionForItem(activeItem));
+  if (activeItem) {
+    updateOutlierCornerMeta(activeItem);
+    setBrandWeightFromCloseness(0.48, screentimeCaptionForItem(activeItem));
+  } else {
+    const fallback = defaultScreentimeMoment();
+    updateOutlierCornerMeta({ screentimeMoment: fallback });
+    setBrandWeightFromCloseness(
+      0.48,
+      String(fallback.title || TITLE_FALLBACK).toLowerCase()
+    );
+  }
 }
 
 function clearWheelWorld() {
@@ -2311,6 +2532,18 @@ function updateWheel(clockSec = 0) {
   wheelPage += (wheelPageTarget - wheelPage) * 0.2;
   const page = clamp(wheelPage, 0, maxPage);
 
+  // After scrolling settles, ease back to the drag cross-section
+  if (
+    !wheelCluster.active &&
+    !wheelDrag.active &&
+    combineCrossTarget < 0.5 &&
+    performance.now() - wheelScrollAt > WHEEL_SCROLL_RETURN_MS &&
+    Math.abs(wheelPageVel) < 0.02 &&
+    Math.abs(wheelPageTarget - Math.round(wheelPageTarget)) < 0.1
+  ) {
+    combineCrossTarget = 1;
+  }
+
   // Cross-section idle spin while free (drag mode)
   if (
     !wheelCluster.active &&
@@ -2330,15 +2563,14 @@ function updateWheel(clockSec = 0) {
   const bookCamZ = WHEEL_CAM_Z_BOOK;
   const crossCamZ = WHEEL_CAM_Z_CROSS;
   const browseCamZ = lerp(bookCamZ, crossCamZ, xt);
-  // Sit a little above the spindle so the hinged edges read clearly
-  const browseCamY = lerp(BOOK_PAGE_SIZE * 0.35, 1.15, xt);
+  const browseCamY = lerp(0, 1.15, xt);
+  // Spindle / hinged edge stays in the middle of the page
   wheelCamZSmooth += (browseCamZ - wheelCamZSmooth) * 0.14;
   const mosaicZ = wheelClusterCamZ();
   const camZ = lerp(wheelCamZSmooth, mosaicZ, ct);
   const camY = lerp(browseCamY, 0, ct);
   _camPos.set(0, camY, camZ);
-  _look.set(0, lerp(BOOK_PAGE_SIZE * 0.35, 0, xt), 0);
-  _look.lerp(_tmp.set(0, 0, 0), ct);
+  _look.set(0, 0, 0);
   camera.position.lerp(_camPos, 0.2);
   camera.lookAt(_look);
 
@@ -2351,24 +2583,20 @@ function updateWheel(clockSec = 0) {
     const angle = mesh.userData.wheelAngle ?? 0;
     const t = idx - page; // book page offset
 
-    const pageW =
-      aspect >= 1 ? BOOK_PAGE_SIZE * aspect : BOOK_PAGE_SIZE * aspect;
-    const pageH =
-      aspect >= 1 ? BOOK_PAGE_SIZE : BOOK_PAGE_SIZE / Math.max(aspect, 1e-6);
+    // Landscape-leaning card size without stretching the photo
+    const pageW = BOOK_PAGE_SIZE * Math.max(aspect, ROLODEX_LANDSCAPE);
+    const pageH = pageW / Math.max(aspect, 1e-6);
 
-    // —— Rolodex pose (scroll): every card hinged on a shared bottom edge ——
+    // —— Rolodex pose (scroll): hinged on a shared centre edge ——
     const absT = Math.abs(t);
-    const pitch = clamp(t, -ROLODEX_VISIBLE, ROLODEX_VISIBLE) * ROLODEX_STEP;
-    // Spindle at origin; card extends upward and swings around +X
-    const hingeY = (pageH / 2) * Math.cos(pitch);
-    const hingeZ = (pageH / 2) * Math.sin(pitch);
+    const yaw = clamp(t, -ROLODEX_VISIBLE, ROLODEX_VISIBLE) * ROLODEX_STEP;
     let bookOpacity = 1;
     if (absT > ROLODEX_VISIBLE) bookOpacity = 0;
     else bookOpacity = lerp(1, 0.28, clamp(absT / ROLODEX_VISIBLE, 0, 1));
 
-    // Keep the bottom edge on the shared spindle at the origin
-    _wheelPosA.set(0, hingeY, hingeZ);
-    _wheelQuatA.setFromAxisAngle(_tmp.set(1, 0, 0), pitch);
+    // Vertical spindle at page centre; cards swing around their middle edge
+    _wheelPosA.set(0, 0, 0);
+    _wheelQuatA.setFromAxisAngle(_up, yaw);
     _wheelScaleA.set(pageW, pageH, 1);
 
     // —— Cross-section pose (drag) ——
@@ -2521,7 +2749,7 @@ function applyExperienceFlags() {
   if (experienceView === "combine") {
     viewMode = "wheel";
     hikeArrangement = "path";
-  } else if (experienceView === "zoom") {
+  } else if (experienceView === "outliers") {
     viewMode = "elevation";
     hikeArrangement = "gallery";
   } else {
@@ -2566,12 +2794,12 @@ async function enterHikeGallery() {
   if (trackMesh) trackMesh.visible = false;
 
   if (els.scrollHint) {
-    els.scrollHint.textContent = "ZOOMING OUT…";
+    els.scrollHint.textContent = "GATHERING OUTLIERS…";
     els.scrollHint.classList.remove("is-gone");
     hintHidden = false;
   }
 
-  await ensureGalleryBuilt({ force: false });
+  await ensureGalleryBuilt({ force: true });
   if (buildToken !== galleryBuildToken) return;
   if (galleryRoot) galleryRoot.visible = true;
   document.documentElement.classList.add("is-gallery");
@@ -2598,12 +2826,12 @@ async function enterHikeGallery() {
   if (els.scrollHint) {
     els.scrollHint.textContent = galleryPlanes.length
       ? "MOVE TO SHIFT THRESHOLD · DRAG TO ORBIT"
-      : "NO LAYERS FOUND";
+      : "NO OUTLIERS FOUND";
     els.scrollHint.classList.remove("is-gone");
     hintHidden = false;
   }
   if (els.viewport) {
-    els.viewport.setAttribute("aria-label", "Zoomed-out image gallery");
+    els.viewport.setAttribute("aria-label", "Outliers outside the path timeline");
   }
 }
 
@@ -2634,7 +2862,7 @@ async function setExperienceView(next) {
 
   const prev = experienceView;
   if (prev === "combine") leaveWheelMode();
-  if (prev === "zoom") {
+  if (prev === "outliers") {
     leaveGalleryMode();
     galleryDrag.active = false;
   }
@@ -2646,7 +2874,7 @@ async function setExperienceView(next) {
 
   try {
     if (next === "combine") await enterWheelMode();
-    else if (next === "zoom") await enterHikeGallery();
+    else if (next === "outliers") await enterHikeGallery();
     else enterHikePath();
   } catch (err) {
     console.error("Experience view switch failed", next, err);
@@ -2657,10 +2885,10 @@ async function setExperienceView(next) {
         els.scrollHint.classList.remove("is-gone");
         hintHidden = false;
       }
-    } else if (next === "zoom") {
+    } else if (next === "outliers") {
       leaveGalleryMode();
       if (els.scrollHint) {
-        els.scrollHint.textContent = "ZOOM OUT FAILED TO LOAD";
+        els.scrollHint.textContent = "OUTLIERS FAILED TO LOAD";
         els.scrollHint.classList.remove("is-gone");
         hintHidden = false;
       }
@@ -3070,7 +3298,7 @@ function onTimelineWheel(e) {
 }
 
 function onGalleryPointerDown(e) {
-  if (experienceView !== "zoom" || (e.button != null && e.button !== 0)) return;
+  if (experienceView !== "outliers" || (e.button != null && e.button !== 0)) return;
   sampleGalleryPointer(e);
   galleryDrag.active = true;
   galleryDrag.x = e.clientX;
@@ -3087,7 +3315,7 @@ function onGalleryPointerDown(e) {
 }
 
 function onGalleryPointerMove(e) {
-  if (experienceView !== "zoom") return;
+  if (experienceView !== "outliers") return;
   sampleGalleryPointer(e);
   if (!galleryDrag.active) return;
   const dx = e.clientX - galleryDrag.lastX;
@@ -3116,8 +3344,9 @@ function onViewportWheel(e) {
   if (viewMode === "wheel" || experienceView === "combine") {
     e.preventDefault();
     if (wheelCluster.active) return;
-    // Scroll opens book pages and flicks leaves
+    // Scroll opens book pages and flicks leaves; idle returns to drag view
     combineCrossTarget = 0;
+    wheelScrollAt = performance.now();
     wheelPageVel += clamp(e.deltaY * 0.0032, -1.1, 1.1);
     if (!hintHidden) hideHint();
     ensureAudioCtx();
@@ -4037,7 +4266,7 @@ function bindViewControls() {
       sampleCombinePointer(e);
       onWheelPointerDown(e);
     } else if (experienceView === "path") onInspectPointerDown(e);
-    else if (experienceView === "zoom") onGalleryPointerDown(e);
+    else if (experienceView === "outliers") onGalleryPointerDown(e);
   });
   window.addEventListener("pointerup", (e) => {
     onGalleryPointerUp(e);
@@ -4077,6 +4306,13 @@ async function boot() {
     if (capRes.ok) captionsById = await capRes.json();
   } catch {
     captionsById = {};
+  }
+
+  try {
+    const stRes = await fetch("data/screentime.json");
+    if (stRes.ok) screentimeData = await stRes.json();
+  } catch {
+    screentimeData = null;
   }
 
   lyricLines = await loadLyricLines();

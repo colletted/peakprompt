@@ -1,0 +1,117 @@
+{
+  "date": "2026-10-02",
+  "dateLabel": "2 October",
+  "tzOffsetHours": 2,
+  "sources": [
+    "assets/hike-1/screentime/IMG_4403.PNG",
+    "assets/hike-1/screentime/IMG_4404.PNG"
+  ],
+  "totals": {
+    "screenTime": "7h 51m",
+    "pickups": 362,
+    "firstPickup": "12:00 AM",
+    "social": "3h 35m",
+    "creativity": "35m",
+    "travel": "26m"
+  },
+  "apps": [
+    {
+      "name": "Instagram",
+      "time": "2h 11m",
+      "category": "Social",
+      "firstUsed": 18
+    },
+    {
+      "name": "WhatsApp",
+      "time": "1h 14m",
+      "category": "Social",
+      "firstUsed": 35
+    },
+    {
+      "name": "Google Maps",
+      "time": "17m",
+      "category": "Travel",
+      "firstUsed": 10
+    },
+    {
+      "name": "Camera",
+      "time": null,
+      "category": "Creativity",
+      "firstUsed": 12
+    }
+  ],
+  "moments": [
+    {
+      "id": "day-total",
+      "match": "screentime-overview",
+      "hours": [],
+      "title": "7h 51m of screen time",
+      "eyebrow": "screen time · 2 october",
+      "stat": "social 3h 35m",
+      "detail": "creativity 35m · travel 26m"
+    },
+    {
+      "id": "pickups-total",
+      "match": "screentime-pickups",
+      "hours": [],
+      "title": "362 pick-ups",
+      "eyebrow": "pick-ups · friday",
+      "stat": "well above the week",
+      "detail": "first unlock at midnight"
+    },
+    {
+      "id": "after-midnight",
+      "hours": [0, 1, 2, 3],
+      "title": "social after midnight",
+      "eyebrow": "social · 3h 35m",
+      "stat": "peak near 1 am",
+      "detail": "first pick-up 12:00 am",
+      "app": "WhatsApp"
+    },
+    {
+      "id": "dawn-unlocks",
+      "hours": [5, 6, 7, 8],
+      "title": "dawn pick-up spike",
+      "eyebrow": "pick-ups · 6 am",
+      "stat": "camera · 12 first opens",
+      "detail": "mixed social · creativity · travel",
+      "app": "Camera"
+    },
+    {
+      "id": "midmorning-maps",
+      "hours": [9, 10, 11],
+      "title": "maps before the trail",
+      "eyebrow": "travel · 26m",
+      "stat": "google maps · 17m",
+      "detail": "10 first opens after pick-up",
+      "app": "Google Maps"
+    },
+    {
+      "id": "midday-creativity",
+      "hours": [12, 13, 14, 15],
+      "title": "creativity in the midday cluster",
+      "eyebrow": "creativity · 35m",
+      "stat": "dense pick-ups 12–3 pm",
+      "detail": "instagram still in the mix",
+      "app": "Instagram"
+    },
+    {
+      "id": "evening-social",
+      "hours": [16, 17, 18, 19, 20],
+      "title": "instagram takes the evening",
+      "eyebrow": "instagram · 2h 11m",
+      "stat": "whatsapp · 1h 14m",
+      "detail": "pick-up peak around 6–7 pm",
+      "app": "Instagram"
+    },
+    {
+      "id": "late-scroll",
+      "hours": [21, 22, 23],
+      "title": "whatsapp closes the day",
+      "eyebrow": "whatsapp · 35 first opens",
+      "stat": "362 pick-ups total",
+      "detail": "social still climbing after 9 pm",
+      "app": "WhatsApp"
+    }
+  ]
+}

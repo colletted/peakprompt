@@ -151,11 +151,11 @@ html.is-wheeling .scroll-hint {
   cursor: default;
 }
 
-.experience[data-view="zoom"] .viewport {
+.experience[data-view="outliers"] .viewport {
   cursor: grab;
 }
 
-.experience[data-view="zoom"] .viewport:active {
+.experience[data-view="outliers"] .viewport:active {
   cursor: grabbing;
 }
 
@@ -190,7 +190,7 @@ html.is-wheel-clustering .experience[data-view="combine"] .viewport {
   pointer-events: none;
 }
 
-.experience[data-view="zoom"] .scroll-rail,
+.experience[data-view="outliers"] .scroll-rail,
 .experience[data-view="combine"] .scroll-rail {
   height: 0;
 }
@@ -345,7 +345,7 @@ html.is-inspecting .journey-lyric-bubble {
   opacity: 1;
 }
 
-.experience[data-view="zoom"] .journey-lyrics,
+.experience[data-view="outliers"] .journey-lyrics,
 .experience[data-view="combine"] .journey-lyrics {
   opacity: 0;
 }
@@ -397,14 +397,14 @@ html.is-inspecting .journey-lyric-bubble {
 }
 
 .experience[data-view="path"] .scroll-hint,
-.experience[data-view="zoom"] .scroll-hint,
+.experience[data-view="outliers"] .scroll-hint,
 .experience[data-view="combine"] .scroll-hint {
   opacity: 1;
   transform: translateX(-50%);
 }
 
 .experience[data-view="path"] .scroll-hint.is-gone,
-.experience[data-view="zoom"] .scroll-hint.is-gone,
+.experience[data-view="outliers"] .scroll-hint.is-gone,
 .experience[data-view="combine"] .scroll-hint.is-gone {
   opacity: 0;
   transform: translateX(-50%) translateY(0.5rem);
