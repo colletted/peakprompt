@@ -350,6 +350,16 @@ html.is-inspecting .journey-lyric-bubble {
   opacity: 0;
 }
 
+.experience[data-view="outliers"] .journey-lyrics.is-visible,
+.experience[data-view="combine"] .journey-lyrics.is-visible {
+  opacity: 1;
+}
+
+.journey-lyrics.is-view-intro {
+  width: min(82vw, 22rem);
+  max-height: min(52vh, 20rem);
+}
+
 .journey-lyric-bubble {
   margin: 0;
   max-width: 100%;
@@ -371,6 +381,12 @@ html.is-inspecting .journey-lyric-bubble {
     opacity 0.28s ease,
     transform 0.28s ease,
     background 0.2s ease;
+}
+
+html.is-gallery .journey-lyric-bubble,
+html.is-wheeling .journey-lyric-bubble {
+  background: #2a2a2e;
+  color: #f2f2f2;
 }
 
 .journey-lyric-bubble.is-in {

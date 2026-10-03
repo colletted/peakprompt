@@ -107,6 +107,31 @@ let lastLyricKey = "";
 let smoothLyricProgress = 0;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
+/** Staggered text-message intros when entering PATH / OUTLIERS / COMBINE. */
+let viewNarrativeToken = 0;
+let viewNarrativeActive = false;
+let viewNarrativeTimers = [];
+const VIEW_NARRATIVES = {
+  path: [
+    "hello, fellow social climber",
+    "you've caught me mid-ascent — mid-pose, mid-caption",
+    "this is a visual recording of my first mountain hike",
+    "not the summit trophy shot — the whole sweaty theatre of getting there",
+    "scroll when you're ready. we'll climb it like we're being watched",
+  ],
+  outliers: [
+    "cut. the trail was never the whole story",
+    "while the mountain loaded, the phone kept score",
+    "7h 51m. 362 pick-ups. frames that refused the GPS",
+    "these are the outliers — orbit what wouldn't stay on path",
+  ],
+  combine: [
+    "and now everything talks over each other",
+    "path, pick-ups, peaks — shuffled into one restless deck",
+    "drag to slice the day. scroll to flick the leaves. hold to collapse",
+    "welcome to the combine — no single truth, just the mash",
+  ],
+};
 /** Single experience views: path journey, off-timeline outliers, combined wheel. */
 const EXPERIENCE_VIEWS = ["path", "outliers", "combine"];
 let experienceView = "path";
@@ -2872,6 +2897,9 @@ async function setExperienceView(next) {
   applyExperienceFlags();
   if (selfieGroup) selfieGroup.visible = false;
 
+  cancelViewNarrative();
+  clearLyricBubbles();
+
   try {
     if (next === "combine") await enterWheelMode();
     else if (next === "outliers") await enterHikeGallery();
@@ -2896,6 +2924,7 @@ async function setExperienceView(next) {
   }
 
   updateViewTabs();
+  playViewNarrative(next);
 }
 
 function activeInspectMarkers() {
@@ -3167,6 +3196,7 @@ function onWheelPointerDown(e) {
   if (experienceView !== "combine" || (e.button != null && e.button !== 0)) {
     return;
   }
+  dismissViewNarrative();
   e.preventDefault();
   sampleCombinePointer(e);
   clearWheelHoldTimer();
@@ -3299,6 +3329,7 @@ function onTimelineWheel(e) {
 
 function onGalleryPointerDown(e) {
   if (experienceView !== "outliers" || (e.button != null && e.button !== 0)) return;
+  dismissViewNarrative();
   sampleGalleryPointer(e);
   galleryDrag.active = true;
   galleryDrag.x = e.clientX;
@@ -3344,16 +3375,29 @@ function onViewportWheel(e) {
   if (viewMode === "wheel" || experienceView === "combine") {
     e.preventDefault();
     if (wheelCluster.active) return;
-    // Scroll opens book pages and flicks leaves; idle returns to drag view
+    dismissViewNarrative();
+    // Scroll opens the spread rolodex; idle returns to clustered drag view
+    if (combineCrossTarget > 0.5 && wheelPlanes.length) {
+      const focus = (-wheelAngle / (Math.PI * 2)) * wheelPlanes.length;
+      wheelPage = focus;
+      wheelPageTarget = focus;
+    }
     combineCrossTarget = 0;
     wheelScrollAt = performance.now();
-    wheelPageVel += clamp(e.deltaY * 0.0032, -1.1, 1.1);
+    const impulse = clamp(e.deltaY * 0.0032, -1.35, 1.35);
+    wheelPageVel += impulse * (1 + Math.abs(wheelPageVel) * 1.35);
+    wheelScrollEnergy = clamp(
+      wheelScrollEnergy + Math.abs(impulse) * 0.9,
+      0,
+      1.15
+    );
     if (!hintHidden) hideHint();
     ensureAudioCtx();
     return;
   }
   if (viewMode === "elevation" && hikeArrangement === "gallery") {
     e.preventDefault();
+    dismissViewNarrative();
     galleryCamZ = clamp(
       galleryCamZ + e.deltaY * 0.05,
       GALLERY_CAM_Z_NEAR,
@@ -3694,6 +3738,90 @@ function clearLyricBubbles() {
   lastLyricKey = "";
 }
 
+function clearViewNarrativeTimers() {
+  for (const id of viewNarrativeTimers) clearTimeout(id);
+  viewNarrativeTimers = [];
+}
+
+function narrativeDelay(ms, token) {
+  return new Promise((resolve) => {
+    const id = setTimeout(() => {
+      viewNarrativeTimers = viewNarrativeTimers.filter((t) => t !== id);
+      resolve(token === viewNarrativeToken);
+    }, ms);
+    viewNarrativeTimers.push(id);
+  });
+}
+
+function cancelViewNarrative() {
+  viewNarrativeToken += 1;
+  viewNarrativeActive = false;
+  clearViewNarrativeTimers();
+  const stack = els.journeyLyrics;
+  if (stack) {
+    stack.classList.remove("is-view-intro", "is-visible");
+  }
+}
+
+/** Soft dismiss after the thread has played (keeps last beat brief). */
+function dismissViewNarrative() {
+  if (
+    !viewNarrativeActive &&
+    !els.journeyLyrics?.classList.contains("is-view-intro")
+  ) {
+    return;
+  }
+  cancelViewNarrative();
+  clearLyricBubbles();
+}
+
+/** iMessage-style intro thread before each viewpoint settles in. */
+async function playViewNarrative(view) {
+  const lines = VIEW_NARRATIVES[view];
+  const stack = els.journeyLyrics;
+  if (!lines?.length || !stack) return;
+
+  const token = ++viewNarrativeToken;
+  clearViewNarrativeTimers();
+  viewNarrativeActive = true;
+  clearLyricBubbles();
+  stack.classList.add("is-view-intro", "is-visible");
+
+  // Beat before the first bubble lands
+  if (!(await narrativeDelay(view === "path" ? 520 : 380, token))) return;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (token !== viewNarrativeToken) return;
+    if (lyricBubbleEl) {
+      lyricBubbleEl.classList.remove("is-typing");
+      lyricBubbleEl.classList.add("is-dim");
+    }
+    const bubble = document.createElement("p");
+    bubble.className = "journey-lyric-bubble";
+    bubble.textContent = lines[i];
+    stack.appendChild(bubble);
+    requestAnimationFrame(() => bubble.classList.add("is-in"));
+    lyricBubbleEl = bubble;
+    lyricBubbleIndex = i;
+    trimLyricBubbles(4);
+    const wait = i === lines.length - 1 ? 1600 : 1050 + Math.min(lines[i].length * 12, 700);
+    if (!(await narrativeDelay(wait, token))) return;
+  }
+
+  if (token !== viewNarrativeToken) return;
+  viewNarrativeActive = false;
+
+  // PATH keeps the thread until scroll; other views fade after a hold
+  if (view === "path") return;
+  if (!(await narrativeDelay(2600, token))) return;
+  if (token !== viewNarrativeToken) return;
+  stack.classList.remove("is-visible");
+  await narrativeDelay(360, token);
+  if (token !== viewNarrativeToken) return;
+  clearLyricBubbles();
+  stack.classList.remove("is-view-intro");
+}
+
 function trimLyricBubbles(max = 3) {
   const stack = els.journeyLyrics;
   if (!stack) return;
@@ -3737,6 +3865,15 @@ function ensureLyricBubble(index) {
 function updateJourneyLyric(progress) {
   const stack = els.journeyLyrics;
   if (!stack) return;
+
+  // View intros own the bubble stack; PATH lyrics only on the trail
+  if (
+    viewNarrativeActive ||
+    stack.classList.contains("is-view-intro") ||
+    experienceView !== "path"
+  ) {
+    return;
+  }
 
   const show =
     viewMode === "elevation" &&
@@ -4077,6 +4214,7 @@ async function buildWorld() {
   applyExperienceFlags();
   enterHikePath();
   updateViewTabs();
+  playViewNarrative("path");
 }
 
 function computeOverviewBounds() {
@@ -4146,6 +4284,8 @@ function endIntro({ keepHint = false } = {}) {
   metaLabelsVisible = false;
   restoreJourneyFog();
   setAllMarkersVisualMode("layers");
+  // Clear the opening text thread so trail lyrics can take over
+  dismissViewNarrative();
   if (!keepHint) hideHint();
 }
 
