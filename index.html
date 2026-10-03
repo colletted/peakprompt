@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>peak prompt</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div class="experience">
+      <h1 class="title-overlay" id="page-title">quiet winding trail</h1>
+
+      <div id="viewport" class="viewport" aria-label="Hike through time"></div>
+
+      <div class="scroll-rail" id="scroll-rail" aria-hidden="true"></div>
+
+      <p class="scroll-hint" id="scroll-hint">scroll</p>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

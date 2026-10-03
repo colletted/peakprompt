@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Peak Prompt — X·Y Chart</title>
+    <link rel="stylesheet" href="chart.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <p class="brand-mark">Peak Prompt</p>
+        <h1 id="trail-name">Loading…</h1>
+        <p id="trail-meta" class="meta"></p>
+      </div>
+      <div class="controls">
+        <label class="control">
+          <span>X axis</span>
+          <select id="axis-x">
+            <option value="time" selected>Time</option>
+            <option value="lon">Longitude</option>
+            <option value="progress">Track progress</option>
+          </select>
+        </label>
+        <label class="control">
+          <span>Y axis</span>
+          <select id="axis-y">
+            <option value="ele" selected>Altitude</option>
+            <option value="lat">Latitude</option>
+            <option value="time">Time</option>
+          </select>
+        </label>
+        <nav class="nav-links">
+          <a href="index.html">3D track</a>
+          <span aria-hidden="true">·</span>
+          <a href="chart.html" aria-current="page">X·Y chart</a>
+        </nav>
+        <p class="axis-legend" aria-hidden="true">
+          <span>Scroll to zoom</span>
+          <span>Drag to pan</span>
+        </p>
+      </div>
+    </header>
+
+    <main class="stage">
+      <canvas id="chart" aria-label="X Y cross chart of media against GPX"></canvas>
+      <div class="axis-label x" id="label-x">Time →</div>
+      <div class="axis-label y" id="label-y">↑ Altitude</div>
+    </main>
+
+    <aside class="hud" id="hud" hidden>
+      <p id="hud-title"></p>
+      <p id="hud-meta"></p>
+      <button type="button" id="hud-open">Open</button>
+    </aside>
+
+    <dialog id="lightbox" class="lightbox">
+      <button type="button" class="close" id="lightbox-close" aria-label="Close">
+        ×
+      </button>
+      <figure>
+        <div class="lightbox-media" id="lightbox-media"></div>
+        <figcaption id="lightbox-caption"></figcaption>
+      </figure>
+    </dialog>
+
+    <script type="module" src="chart.js"></script>
+  </body>
+</html>
