@@ -37,7 +37,7 @@ const STEP_STRIDE_M = 0.75; // estimated hiking stride
 const TUNNEL_IMAGE_CAP = 40;
 const TUNNEL_GAP = 14;
 const TUNNEL_WORLD_SIZE = 20; // fixed world height for cavern planes
-const WHEEL_IMAGE_CAP = 28;
+const LAYER_IMAGE_CAP = 36;
 const WHEEL_CARD = 14; // half-extends from hub so cards cross at their centres
 const WHEEL_CAM_Z_DEFAULT = 78;
 const WHEEL_CAM_Z_NEAR = 26;
@@ -46,6 +46,12 @@ const WHEEL_IDLE_SPIN = 0.1; // rad/s — slow carousel drift
 const WHEEL_TIP = -0.38;
 const WHEEL_STACK_SIZE = 22; // shared frame size when layered into one image
 const WHEEL_STACK_Z = 0.04; // tiny depth offset so layers composite cleanly
+const GALLERY_RADIUS = 40;
+const GALLERY_CARD = 9.5;
+const GALLERY_CAM_Z_DEFAULT = 96;
+const GALLERY_CAM_Z_NEAR = 42;
+const GALLERY_CAM_Z_FAR = 150;
+const GALLERY_IDLE_SPIN = 0.06;
 const _wheelRadial = new THREE.Vector3();
 const _wheelUp = new THREE.Vector3(0, 0, 1);
 const _wheelTangent = new THREE.Vector3();
@@ -88,7 +94,7 @@ let lastLyricKey = "";
 let smoothLyricProgress = 0;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
-const VIEW_MODES = ["elevation", "timeline", "tunnel", "wheel"];
+const VIEW_MODES = ["elevation", "wheel"];
 let viewMode = "elevation";
 let timelineFocus = 0;
 let timelineFocusSmooth = 0;
@@ -100,6 +106,16 @@ let tunnelProgress = 0;
 let smoothTunnelProgress = 0;
 let tunnelCamZ = 0;
 let tunnelBuildToken = 0;
+let galleryRoot = null;
+let galleryPlanes = [];
+let galleryBuildToken = 0;
+let galleryYaw = 0;
+let galleryYawTarget = 0;
+let galleryPitch = 0.18;
+let galleryPitchTarget = 0.18;
+let galleryCamZ = GALLERY_CAM_Z_DEFAULT;
+let galleryCamZSmooth = GALLERY_CAM_Z_DEFAULT;
+let galleryDrag = { active: false, x: 0, y: 0, lastX: 0, lastY: 0 };
 let wheelRoot = null;
 let wheelPivot = null;
 let wheelPlanes = [];
@@ -1751,7 +1767,7 @@ function textureAspect(map) {
   return w / Math.max(h, 1e-6);
 }
 
-/** High-res threshold band (owned texture) for TUNNEL / WHEEL. */
+/** High-res threshold band (owned texture) for gallery / postcards. */
 async function bakeThresholdLayerPlane(group, role) {
   const item = group.userData.item;
   const url = item?.thumb || item?.path;
@@ -1826,6 +1842,131 @@ async function ensureTunnelBuilt({ force = false } = {}) {
   scene.add(tunnelGroup);
 }
 
+function pickLayerMarkers(cap = LAYER_IMAGE_CAP) {
+  const markers = interactives
+    .filter((g) => (g.userData.planes || []).length)
+    .sort((a, b) => a.userData.timeT - b.userData.timeT);
+  return markers.length <= cap ? markers : spacePick(markers, cap);
+}
+
+function fibonacciSphere(i, n, radius) {
+  if (n <= 1) return new THREE.Vector3(0, 0, radius);
+  const y = 1 - (i / Math.max(n - 1, 1)) * 2;
+  const r = Math.sqrt(Math.max(0, 1 - y * y));
+  const theta = Math.PI * (3 - Math.sqrt(5)) * i;
+  return new THREE.Vector3(
+    Math.cos(theta) * r * radius,
+    y * radius * 0.85,
+    Math.sin(theta) * r * radius
+  );
+}
+
+function clearGalleryWorld() {
+  if (!galleryRoot) return;
+  scene.remove(galleryRoot);
+  galleryRoot.traverse((obj) => disposeObject3D(obj));
+  galleryRoot = null;
+  galleryPlanes = [];
+}
+
+async function ensureGalleryBuilt({ force = false } = {}) {
+  if (!force && galleryRoot && galleryPlanes.length) return;
+  clearGalleryWorld();
+
+  const picks = pickLayerMarkers(LAYER_IMAGE_CAP);
+  galleryRoot = new THREE.Group();
+  galleryRoot.visible = false;
+  galleryPlanes = [];
+
+  const n = picks.length;
+  for (let i = 0; i < n; i++) {
+    const mesh = await bakeOneLayerForMarker(picks[i]);
+    if (!mesh) continue;
+    const pos = fibonacciSphere(galleryPlanes.length, Math.max(n, 1), GALLERY_RADIUS);
+    mesh.userData.galleryPos = pos.clone();
+    mesh.userData.galleryIndex = galleryPlanes.length;
+    mesh.position.copy(pos);
+    const aspect = mesh.userData.aspect || 1;
+    mesh.scale.set(GALLERY_CARD * aspect, GALLERY_CARD, 1);
+    if (mesh.material) {
+      mesh.material.opacity = 1;
+      mesh.material.transparent = true;
+      mesh.material.depthWrite = false;
+    }
+    galleryRoot.add(mesh);
+    galleryPlanes.push(mesh);
+  }
+
+  // Re-space with final count after bake skips
+  const finalN = Math.max(galleryPlanes.length, 1);
+  for (let i = 0; i < galleryPlanes.length; i++) {
+    const pos = fibonacciSphere(i, finalN, GALLERY_RADIUS);
+    galleryPlanes[i].userData.galleryPos = pos;
+    galleryPlanes[i].userData.galleryIndex = i;
+    galleryPlanes[i].position.copy(pos);
+  }
+
+  scene.add(galleryRoot);
+}
+
+function leaveGalleryMode() {
+  galleryBuildToken += 1;
+  galleryDrag.active = false;
+  if (galleryRoot) galleryRoot.visible = false;
+  document.documentElement.classList.remove("is-gallery");
+}
+
+function updateGallery(clockSec = 0) {
+  if (!camera || !galleryRoot || !galleryPlanes.length) return;
+  galleryRoot.visible = true;
+
+  if (!galleryDrag.active) {
+    galleryYawTarget += GALLERY_IDLE_SPIN * (1 / 60);
+  }
+  galleryYaw += (galleryYawTarget - galleryYaw) * 0.12;
+  galleryPitch += (galleryPitchTarget - galleryPitch) * 0.12;
+  galleryRoot.rotation.order = "YXZ";
+  galleryRoot.rotation.y = galleryYaw;
+  galleryRoot.rotation.x = galleryPitch;
+
+  galleryCamZSmooth += (galleryCamZ - galleryCamZSmooth) * 0.12;
+  _camPos.set(0, 4, galleryCamZSmooth);
+  _look.set(0, 0, 0);
+  camera.position.lerp(_camPos, 0.16);
+  camera.lookAt(_look);
+
+  if (scene?.background) scene.background.setRGB(0.08, 0.08, 0.09);
+  if (scene?.fog) {
+    scene.fog.color.setRGB(0.08, 0.08, 0.09);
+    scene.fog.near = Math.max(8, galleryCamZSmooth * 0.2);
+    scene.fog.far = Math.max(60, galleryCamZSmooth * 2.4);
+  }
+
+  let activeItem = null;
+  let best = Infinity;
+  for (const mesh of galleryPlanes) {
+    const home = mesh.userData.galleryPos;
+    if (home) mesh.position.copy(home);
+    // Face the camera so the exploded cloud reads as a gallery
+    mesh.lookAt(camera.position);
+    const aspect = mesh.userData.aspect || 1;
+    mesh.scale.set(GALLERY_CARD * aspect, GALLERY_CARD, 1);
+    if (mesh.material) mesh.material.opacity = 1;
+
+    mesh.getWorldPosition(_tmp);
+    const d = camera.position.distanceToSquared(_tmp);
+    if (d < best) {
+      best = d;
+      activeItem = mesh.userData.item;
+    }
+  }
+
+  const progress =
+    activeItem?.ts != null ? timeNormTs(activeItem.ts) : smoothProgress;
+  updateCornerMeta(clamp(progress, 0, 1), activeItem);
+  setBrandWeightFromCloseness(0.48, captionForItem(activeItem));
+}
+
 function clearWheelWorld() {
   if (!wheelRoot) return;
   scene.remove(wheelRoot);
@@ -1839,13 +1980,7 @@ async function ensureWheelBuilt({ force = false } = {}) {
   if (!force && wheelRoot && wheelPlanes.length) return;
   clearWheelWorld();
 
-  const markers = interactives
-    .filter((g) => (g.userData.planes || []).length)
-    .sort((a, b) => a.userData.timeT - b.userData.timeT);
-  const picks =
-    markers.length <= WHEEL_IMAGE_CAP
-      ? markers
-      : spacePick(markers, WHEEL_IMAGE_CAP);
+  const picks = pickLayerMarkers(LAYER_IMAGE_CAP);
 
   wheelRoot = new THREE.Group();
   wheelRoot.visible = false;
@@ -1881,14 +2016,14 @@ async function ensureWheelBuilt({ force = false } = {}) {
 async function enterWheelMode() {
   const buildToken = ++wheelBuildToken;
   document.documentElement.style.overflow = "hidden";
-  leaveTunnelMode();
+  leaveGalleryMode();
   setHikeWorldVisible(false);
   setSelfieCardsVisible(false);
   if (selfieGroup) selfieGroup.visible = false;
   if (trackMesh) trackMesh.visible = false;
 
   if (els.scrollHint) {
-    els.scrollHint.textContent = "BUILDING WHEEL…";
+    els.scrollHint.textContent = "BUILDING POSTCARDS…";
     els.scrollHint.classList.remove("is-gone");
     hintHidden = false;
   }
@@ -1923,7 +2058,7 @@ async function enterWheelMode() {
     hintHidden = false;
   }
   if (els.viewport) {
-    els.viewport.setAttribute("aria-label", "Spinning image wheel");
+    els.viewport.setAttribute("aria-label", "Spinning postcards");
   }
 }
 
@@ -2087,38 +2222,58 @@ function leaveTunnelMode() {
   document.documentElement.classList.remove("is-tunneling");
 }
 
-function enterElevationMode() {
-  document.documentElement.style.overflow = "";
-  leaveTunnelMode();
+async function enterElevationMode() {
+  const buildToken = ++galleryBuildToken;
+  document.documentElement.style.overflow = "hidden";
   leaveWheelMode();
   if (selfieGroup) selfieGroup.visible = false;
   setSelfieCardsVisible(false);
-  restoreHikeLayout();
-  setHikeWorldVisible(true);
-  restoreJourneyFog();
-  window.scrollTo(0, savedScrollY);
-  scrollProgress = readScrollProgress();
-  smoothProgress = scrollProgress;
+  setHikeWorldVisible(false);
+  if (trackMesh) trackMesh.visible = false;
+
   if (els.scrollHint) {
-    els.scrollHint.textContent = "SCROLL TO BEGIN THE PASSAGE";
-    if (scrollProgress > 0.01) {
-      els.scrollHint.classList.add("is-gone");
-      hintHidden = true;
-    } else {
-      els.scrollHint.classList.remove("is-gone");
-      hintHidden = false;
-    }
+    els.scrollHint.textContent = "BUILDING GALLERY…";
+    els.scrollHint.classList.remove("is-gone");
+    hintHidden = false;
   }
-  if (els.viewport) els.viewport.setAttribute("aria-label", "Hike through time");
+
+  await ensureGalleryBuilt({ force: false });
+  if (buildToken !== galleryBuildToken) return;
+  if (galleryRoot) galleryRoot.visible = true;
+  document.documentElement.classList.add("is-gallery");
+
+  galleryYaw = 0;
+  galleryYawTarget = 0;
+  galleryPitch = 0.18;
+  galleryPitchTarget = 0.18;
+  galleryCamZ = GALLERY_CAM_Z_DEFAULT;
+  galleryCamZSmooth = GALLERY_CAM_Z_DEFAULT;
+  galleryDrag.active = false;
+
+  if (scene?.fog) {
+    scene.fog.near = 20;
+    scene.fog.far = 180;
+    scene.fog.color.setRGB(0.08, 0.08, 0.09);
+  }
+  if (scene?.background) scene.background.setRGB(0.08, 0.08, 0.09);
+
+  if (els.scrollHint) {
+    els.scrollHint.textContent = galleryPlanes.length
+      ? "DRAG TO EXPLORE · SCROLL TO ZOOM"
+      : "NO LAYERS FOUND";
+    els.scrollHint.classList.remove("is-gone");
+    hintHidden = false;
+  }
+  if (els.viewport) {
+    els.viewport.setAttribute("aria-label", "Exploded image gallery");
+  }
 }
 
 function updateModeToggle() {
   if (!els.modeToggle) return;
   const labels = {
     elevation: "THE HIKE",
-    timeline: "SELFIES",
-    tunnel: "TUNNEL",
-    wheel: "WHEEL",
+    wheel: "POSTCARDS",
   };
   const next = VIEW_MODES[(VIEW_MODES.indexOf(viewMode) + 1) % VIEW_MODES.length];
   els.modeToggle.textContent = labels[viewMode] || "THE HIKE";
@@ -2136,38 +2291,31 @@ async function setViewMode(mode) {
   if (!VIEW_MODES.includes(mode) || mode === viewMode) return;
   if (introActive) endIntro({ keepHint: true });
   endInspect();
+  endWheelCluster();
 
-  if (viewMode === "elevation") savedScrollY = window.scrollY;
-  if (viewMode === "timeline" || viewMode === "wheel") {
-    document.documentElement.style.overflow = "";
-  }
-  if (viewMode === "tunnel") leaveTunnelMode();
+  if (viewMode === "elevation") leaveGalleryMode();
   if (viewMode === "wheel") leaveWheelMode();
 
   viewMode = mode;
   els.experience?.setAttribute("data-mode", mode);
-
-  // Hide the flat selfie board — SELFIES mode is the timeline rolodex
   if (selfieGroup) selfieGroup.visible = false;
 
   try {
-    if (mode === "timeline") enterTimelineMode();
-    else if (mode === "tunnel") await enterTunnelMode();
-    else if (mode === "wheel") await enterWheelMode();
-    else enterElevationMode();
+    if (mode === "wheel") await enterWheelMode();
+    else await enterElevationMode();
   } catch (err) {
     console.error("View mode switch failed", mode, err);
-    if (mode === "tunnel") {
-      leaveTunnelMode();
+    if (mode === "wheel") {
+      leaveWheelMode();
       if (els.scrollHint) {
-        els.scrollHint.textContent = "TUNNEL FAILED TO LOAD";
+        els.scrollHint.textContent = "POSTCARDS FAILED TO LOAD";
         els.scrollHint.classList.remove("is-gone");
         hintHidden = false;
       }
-    } else if (mode === "wheel") {
-      leaveWheelMode();
+    } else {
+      leaveGalleryMode();
       if (els.scrollHint) {
-        els.scrollHint.textContent = "WHEEL FAILED TO LOAD";
+        els.scrollHint.textContent = "GALLERY FAILED TO LOAD";
         els.scrollHint.classList.remove("is-gone");
         hintHidden = false;
       }
@@ -2530,13 +2678,45 @@ function onTimelineWheel(e) {
   ensureAudioCtx();
 }
 
+function onGalleryPointerDown(e) {
+  if (viewMode !== "elevation" || (e.button != null && e.button !== 0)) return;
+  galleryDrag.active = true;
+  galleryDrag.x = e.clientX;
+  galleryDrag.y = e.clientY;
+  galleryDrag.lastX = e.clientX;
+  galleryDrag.lastY = e.clientY;
+  try {
+    els.viewport?.setPointerCapture?.(e.pointerId);
+  } catch {
+    /* ignore */
+  }
+  if (!hintHidden) hideHint();
+  ensureAudioCtx();
+}
+
+function onGalleryPointerMove(e) {
+  if (viewMode !== "elevation" || !galleryDrag.active) return;
+  const dx = e.clientX - galleryDrag.lastX;
+  const dy = e.clientY - galleryDrag.lastY;
+  galleryDrag.lastX = e.clientX;
+  galleryDrag.lastY = e.clientY;
+  galleryYawTarget += dx * 0.005;
+  galleryPitchTarget = clamp(galleryPitchTarget + dy * 0.0035, -0.55, 0.75);
+}
+
+function onGalleryPointerUp(e) {
+  if (!galleryDrag.active) return;
+  galleryDrag.active = false;
+  try {
+    els.viewport?.releasePointerCapture?.(e.pointerId);
+  } catch {
+    /* ignore */
+  }
+}
+
 function onViewportWheel(e) {
   if (inspectHold.active) {
     e.preventDefault();
-    return;
-  }
-  if (viewMode === "timeline") {
-    onTimelineWheel(e);
     return;
   }
   if (viewMode === "wheel") {
@@ -2552,9 +2732,18 @@ function onViewportWheel(e) {
     ensureAudioCtx();
     return;
   }
-  // Viewport captures pointer events — forward scroll for hike + tunnel
+  if (viewMode === "elevation") {
+    e.preventDefault();
+    galleryCamZ = clamp(
+      galleryCamZ + e.deltaY * 0.05,
+      GALLERY_CAM_Z_NEAR,
+      GALLERY_CAM_Z_FAR
+    );
+    if (!hintHidden) hideHint();
+    ensureAudioCtx();
+    return;
+  }
   e.preventDefault();
-  window.scrollBy(0, e.deltaY);
 }
 
 function onSelfiePointerDown(e) {
@@ -3226,19 +3415,15 @@ async function buildWorld() {
   trackCurve = built.curve;
   scene.add(trackMesh);
 
-  // Resolve SELFIES first so blank / non-human frames never enter the rolodex
-  const selfieSamples = await resolveSelfieMedia(data.media, gpx);
-  const selfiePaths = new Set(selfieSamples.map((m) => m.path));
-
-  const samples = sampleMedia(
-    data.media.filter((m) => !selfiePaths.has(m.path)),
-    gpx
-  );
+  // Trail markers still feed layer bakes; selfies stay out of the gallery/wheel set
+  const samples = sampleMedia(data.media, gpx);
   interactives = [];
   await Promise.all(
     samples.map(async (item) => {
       const pos = positionForItem(item, project, trackPoints, trackCurve);
       const marker = await makeMediaMarker(item, pos);
+      marker.visible = false;
+      setGroupPresence(marker, 0);
       scene.add(marker);
       interactives.push(marker);
     })
@@ -3246,23 +3431,7 @@ async function buildWorld() {
 
   interactives.sort((a, b) => a.userData.timeT - b.userData.timeT);
   calibrateClosenessExtent(interactives);
-
   selfieInteractives = [];
-  await Promise.all(
-    selfieSamples.map(async (item) => {
-      const pos = positionForItem(item, project, trackPoints, trackCurve);
-      const marker = await makeMediaMarker(item, pos);
-      if (!(marker.userData.planes || []).length) {
-        marker.traverse((obj) => disposeObject3D(obj));
-        return;
-      }
-      marker.visible = false;
-      setGroupPresence(marker, 0);
-      scene.add(marker);
-      selfieInteractives.push(marker);
-    })
-  );
-  selfieInteractives.sort((a, b) => a.userData.timeT - b.userData.timeT);
 
   journeyColors = buildJourneyColorField(
     interactives.filter((g) => !g.userData.item?.beyond)
@@ -3274,7 +3443,14 @@ async function buildWorld() {
   // Sound envelopes for motion (non-blocking if a clip fails)
   await loadSoundClips(data.media);
 
-  beginAtTimelineStart();
+  if (trackMesh) trackMesh.visible = false;
+  setHikeWorldVisible(false);
+  introActive = false;
+  metaLabelsVisible = false;
+  setAllMarkersVisualMode("layers");
+  viewMode = "elevation";
+  els.experience?.setAttribute("data-mode", "elevation");
+  await enterElevationMode();
   updateModeToggle();
 }
 
@@ -3389,38 +3565,10 @@ function beginAtTimelineStart() {
 function animate() {
   frameId = requestAnimationFrame(animate);
   const clockSec = performance.now() * 0.001;
-  if (viewMode === "timeline") {
-    updateTimeline(clockSec);
-  } else if (viewMode === "tunnel") {
-    updateTunnel();
-  } else if (viewMode === "wheel") {
+  if (viewMode === "wheel") {
     updateWheel(clockSec);
-  } else if (inspectHold.active) {
-    if (introActive) {
-      updateOverview(clockSec);
-    } else {
-      // Keep camera on the trail while the held photo centers itself
-      smoothProgress += (scrollProgress - smoothProgress) * 0.085;
-      const u = clamp(smoothProgress, 0, 0.999);
-      if (trackCurve) {
-        const pos = trackCurve.getPointAt(u);
-        const tangent = trackCurve.getTangentAt(u).normalize();
-        _side.crossVectors(tangent, _up);
-        if (_side.lengthSq() < 1e-6) _side.set(1, 0, 0);
-        else _side.normalize();
-        _camPos.copy(pos).addScaledVector(_side, 95).addScaledVector(_up, 55);
-        _look.copy(pos).addScaledVector(tangent, 90).addScaledVector(_up, 18);
-        camera.position.lerp(_camPos, 0.12);
-        camera.lookAt(_look);
-      }
-    }
-    updateInspectFrame();
-  } else if (introActive) {
-    updateOverview(clockSec);
-    updateJourneyLyric(0);
-  } else {
-    smoothProgress += (scrollProgress - smoothProgress) * 0.085;
-    updateJourney(smoothProgress, clockSec);
+  } else if (viewMode === "elevation") {
+    updateGallery(clockSec);
   }
   renderer.render(scene, camera);
 }
@@ -3435,22 +3583,7 @@ function onResize() {
 }
 
 function onScroll() {
-  if (viewMode === "tunnel") {
-    tunnelProgress = readScrollProgress();
-    if (tunnelProgress > 0.01) hideHint();
-    ensureAudioCtx();
-    return;
-  }
-  if (viewMode !== "elevation") return;
-  scrollProgress = readScrollProgress();
-  if (introActive && scrollProgress > 0.004) {
-    endIntro();
-  }
-  if (scrollProgress > 0.01) {
-    hideHint();
-    if (metaLabelsVisible) metaLabelsVisible = false;
-  }
-  ensureAudioCtx();
+  // Gallery + wheel own their own zoom / spin; page scroll is unused
 }
 
 function bindModeControls() {
@@ -3458,7 +3591,7 @@ function bindModeControls() {
     ensureAudioCtx();
     toggleViewMode();
   });
-  els.viewport?.addEventListener("pointermove", onTimelinePointer, {
+  els.viewport?.addEventListener("pointermove", onGalleryPointerMove, {
     passive: true,
   });
   els.viewport?.addEventListener("pointermove", onWheelPointerMove, {
@@ -3467,17 +3600,20 @@ function bindModeControls() {
   els.viewport?.addEventListener("wheel", onViewportWheel, { passive: false });
   els.viewport?.addEventListener("pointerdown", (e) => {
     if (viewMode === "wheel") onWheelPointerDown(e);
-    else onInspectPointerDown(e);
+    else if (viewMode === "elevation") onGalleryPointerDown(e);
   });
   window.addEventListener("pointerup", (e) => {
+    onGalleryPointerUp(e);
     onWheelPointerUp(e);
     onInspectPointerUp(e);
   });
   window.addEventListener("pointercancel", (e) => {
+    onGalleryPointerUp(e);
     onWheelPointerUp(e);
     onInspectPointerUp(e);
   });
   window.addEventListener("blur", () => {
+    onGalleryPointerUp({});
     endWheelCluster();
     endInspect();
   });
