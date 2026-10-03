@@ -81,15 +81,18 @@ body {
   display: grid;
   place-items: center;
   margin: 0;
-  padding: 0 clamp(1rem, 4vw, 2.5rem);
+  padding: 0 clamp(1.25rem, 5vw, 3rem);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100vw;
+  overflow: visible;
   pointer-events: none;
   font-family: var(--font-display);
-  font-size: clamp(1.85rem, 5.2vw, 3.4rem);
+  font-size: clamp(2.4rem, 7vw, 4.75rem);
   font-weight: 300;
   letter-spacing: -0.03em;
-  line-height: 1;
+  line-height: 1.1;
   text-align: center;
-  white-space: nowrap;
   color: #ffffff;
   /* Exclusion keeps the line readable on white and on saturated image planes */
   mix-blend-mode: exclusion;
@@ -101,6 +104,11 @@ body {
   z-index: 1;
   background: transparent;
   pointer-events: none;
+}
+
+.experience[data-mode="timeline"] .viewport {
+  pointer-events: auto;
+  cursor: ew-resize;
 }
 
 .viewport canvas {
@@ -116,6 +124,40 @@ body {
   pointer-events: none;
 }
 
+.experience[data-mode="timeline"] .scroll-rail {
+  height: 0;
+}
+
+.mode-toggle {
+  position: fixed;
+  top: clamp(1.25rem, 4vh, 2.5rem);
+  left: 50%;
+  z-index: 40;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  color: #555555;
+  cursor: pointer;
+  pointer-events: auto;
+  white-space: nowrap;
+  transition: color 0.2s ease;
+}
+
+.mode-toggle:hover {
+  color: #222222;
+}
+
+.mode-toggle[aria-pressed="true"] {
+  color: #111111;
+}
+
 .scroll-hint {
   position: fixed;
   left: 50%;
@@ -123,16 +165,69 @@ body {
   z-index: 20;
   margin: 0;
   transform: translateX(-50%);
-  font-family: var(--font-display);
-  font-size: 0.95rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid #d8d8d8;
+  background: rgba(255, 255, 255, 0.88);
+  font-family: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 0.72rem;
   font-weight: 400;
-  letter-spacing: 0.06em;
-  color: var(--muted);
+  letter-spacing: 0.04em;
+  line-height: 1;
+  color: #555555;
   pointer-events: none;
+  white-space: nowrap;
   transition: opacity 0.8s ease, transform 0.8s ease;
 }
 
+.meta-chip {
+  position: fixed;
+  z-index: 20;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: ui-monospace, "SF Mono", "Menlo", "Consolas", monospace;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  color: #555555;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.meta-chip--top-left,
+.meta-chip--top-right {
+  top: clamp(1.25rem, 4vh, 2.5rem);
+}
+
+.meta-chip--bottom-left,
+.meta-chip--bottom-right {
+  bottom: clamp(1.25rem, 4vh, 2.5rem);
+}
+
+.meta-chip--top-left,
+.meta-chip--bottom-left {
+  left: clamp(1rem, 4vw, 2.5rem);
+}
+
+.meta-chip--top-right,
+.meta-chip--bottom-right {
+  right: clamp(1rem, 4vw, 2.5rem);
+}
+
 .scroll-hint.is-gone {
+  opacity: 0;
+  transform: translateX(-50%) translateY(0.5rem);
+}
+
+.experience[data-mode="timeline"] .scroll-hint {
+  opacity: 1;
+  transform: translateX(-50%);
+}
+
+.experience[data-mode="timeline"] .scroll-hint.is-gone {
   opacity: 0;
   transform: translateX(-50%) translateY(0.5rem);
 }

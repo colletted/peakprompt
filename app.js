@@ -1,20 +1,38 @@
 import * as THREE from "three";
 
 const els = {
+  experience: document.querySelector(".experience"),
   viewport: document.getElementById("viewport"),
   scrollRail: document.getElementById("scroll-rail"),
   scrollHint: document.getElementById("scroll-hint"),
+  modeToggle: document.getElementById("mode-toggle"),
+  metaTime: document.getElementById("meta-time"),
+  metaAltitude: document.getElementById("meta-altitude"),
+  metaLocation: document.getElementById("meta-location"),
+  metaSteps: document.getElementById("meta-steps"),
   pageTitle: document.getElementById("page-title"),
 };
 
-const BRAND_WEIGHTS = [300, 400, 500, 700, 800, 900];
+const fmtMetaTime = new Intl.DateTimeFormat(undefined, {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+const BRAND_WEIGHTS = [300, 400, 500]; // light → regular → medium (no bold/heavy)
 const TITLE_FALLBACK = "quiet winding trail";
 
 const VERTICAL_EXAGGERATION = 1.8;
 const MEDIA_SAMPLE = 72;
+const OFF_TRACK_SAMPLE = 18; // each side: before start / after end
 const TIME_WINDOW = 0.07;
 const AUDIO_TIME_SIGMA = 100; // seconds — images near a recording
 const AUDIO_SCROLL_SIGMA = 0.04;
+const TIMELINE_CARD_GAP = 22;
+const TIMELINE_RECED = 11;
+const TIMELINE_YAW = 0.48;
+const STEP_STRIDE_M = 0.75; // estimated hiking stride
 
 let data = null;
 let renderer, scene, camera;
@@ -31,17 +49,27 @@ let smoothCloseness = 0.35;
 let closenessExtent = { min: 0, max: 1 };
 let smoothJourneyColor = { r: 200, g: 200, b: 200 };
 let hintHidden = false;
+let metaLabelsVisible = true;
 let audioCtx = null;
 let audioUnlocked = false;
 let lastTitleKey = "";
 let titleText = TITLE_FALLBACK;
 let captionsById = {};
+let viewMode = "elevation"; // "elevation" | "timeline"
+let timelineFocus = 0;
+let timelineFocusSmooth = 0;
+let timelinePointerX = 0.5; // 0..1 across viewport
+let savedScrollY = 0;
+let introActive = true;
+let overviewCenter = new THREE.Vector3();
+let overviewRadius = 400;
 
 const thresholdResponse = 0.8;
 const layerResponse = 0.8;
 let altitudeTemplate = null;
 let eleMin = 2100;
 let eleMax = 2700;
+let trackDistances = []; // cumulative path metres at each GPX index
 
 const imageCache = new Map();
 const matchCache = new Map();
@@ -313,23 +341,56 @@ function syncSoundPlayback(progress) {
   }
 }
 
+function spacePick(arr, n) {
+  if (!arr.length || n <= 0) return [];
+  const count = Math.min(n, arr.length);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const idx = Math.round((i / Math.max(count - 1, 1)) * (arr.length - 1));
+    out.push(arr[idx]);
+  }
+  return out;
+}
+
 function sampleMedia(media, gpx) {
   const onTrack = media.filter(
     (m) => m.onTrack && (m.kind === "image" || m.kind === "video") && m.thumb
   );
-  const picks = [];
-  if (onTrack.length) {
-    const n = Math.min(MEDIA_SAMPLE, onTrack.length);
-    for (let i = 0; i < n; i++) {
-      const idx = Math.round((i / Math.max(n - 1, 1)) * (onTrack.length - 1));
-      picks.push(onTrack[idx]);
-    }
-  }
+  const offTrack = media.filter(
+    (m) => !m.onTrack && (m.kind === "image" || m.kind === "video") && m.thumb
+  );
+  const before = offTrack
+    .filter((m) => m.ts < gpx.startTs)
+    .sort((a, b) => a.ts - b.ts);
+  const after = offTrack
+    .filter((m) => m.ts > gpx.endTs)
+    .sort((a, b) => a.ts - b.ts);
+
+  const picks = [
+    ...spacePick(onTrack, MEDIA_SAMPLE),
+    ...spacePick(before, OFF_TRACK_SAMPLE).map((m, i, arr) => ({
+      ...m,
+      beyond: "before",
+      floatT: arr.length <= 1 ? 0.5 : i / (arr.length - 1),
+      ele: m.ele ?? gpx.track[0]?.ele,
+    })),
+    ...spacePick(after, OFF_TRACK_SAMPLE).map((m, i, arr) => ({
+      ...m,
+      beyond: "after",
+      floatT: arr.length <= 1 ? 0.5 : i / (arr.length - 1),
+      ele: m.ele ?? gpx.track[gpx.track.length - 1]?.ele,
+    })),
+  ];
+
   const seen = new Set();
   const unique = [];
   for (const m of picks) {
     if (seen.has(m.path)) continue;
     seen.add(m.path);
+    if (m.beyond) {
+      unique.push(m);
+      continue;
+    }
     const pt = m.lat != null && m.lon != null ? m : nearestPoint(gpx.track, m.ts);
     unique.push({
       ...m,
@@ -341,18 +402,73 @@ function sampleMedia(media, gpx) {
   return unique;
 }
 
+/** Journey parameter for presence: on-track 0..1, floaters just outside. */
+function timeTForItem(item) {
+  if (item?.beyond === "before") {
+    const t = item.floatT ?? 0.5;
+    // Spread just before the trailhead so they bloom when scroll ≈ 0
+    return -0.015 - (1 - t) * 0.11;
+  }
+  if (item?.beyond === "after") {
+    const t = item.floatT ?? 0.5;
+    return 1.015 + t * 0.11;
+  }
+  return timeNorm(item);
+}
+
+/** Place off-track frames in floating clouds beyond the path ends. */
+function positionForItem(item, project, trackPoints, curve) {
+  if (!item.beyond) {
+    return project(item.lat, item.lon, item.ele);
+  }
+
+  const up = new THREE.Vector3(0, 1, 0);
+  const t = item.floatT ?? 0.5;
+  if (item.beyond === "before") {
+    const origin = trackPoints[0];
+    const tan = curve.getTangentAt(0.002).normalize();
+    let side = new THREE.Vector3().crossVectors(tan, up);
+    if (side.lengthSq() < 1e-6) side.set(1, 0, 0);
+    else side.normalize();
+    return origin
+      .clone()
+      .addScaledVector(tan, -(50 + t * 200))
+      .addScaledVector(side, 70 + Math.sin(t * 10.3) * 50)
+      .addScaledVector(up, 20 + Math.cos(t * 7.1) * 40);
+  }
+
+  const origin = trackPoints[trackPoints.length - 1];
+  const tan = curve.getTangentAt(0.998).normalize();
+  let side = new THREE.Vector3().crossVectors(tan, up);
+  if (side.lengthSq() < 1e-6) side.set(1, 0, 0);
+  else side.normalize();
+  return origin
+    .clone()
+    .addScaledVector(tan, 50 + t * 200)
+    .addScaledVector(side, -(70 + Math.sin(t * 9.7) * 50))
+    .addScaledVector(up, 20 + Math.cos(t * 6.4) * 40);
+}
+
+const ALTITUDE_LINE_COLOR = 0x9a9a9a;
+
+function makeStrokeLine(points, { transparent = false } = {}) {
+  const geo = new THREE.BufferGeometry().setFromPoints(points);
+  const mat = new THREE.LineBasicMaterial({
+    color: ALTITUDE_LINE_COLOR,
+    linewidth: 1, // most platforms ignore >1; keep as a hairline stroke
+    transparent,
+    opacity: 1,
+  });
+  const line = new THREE.Line(geo, mat);
+  line.frustumCulled = false;
+  return line;
+}
+
 function makeTrackMesh(points) {
   const curve = new THREE.CatmullRomCurve3(points, false, "catmullrom", 0.15);
   const segs = Math.max(points.length * 2, 64);
   const sampled = curve.getPoints(segs);
-  const geo = new THREE.BufferGeometry().setFromPoints(sampled);
-  const mat = new THREE.LineBasicMaterial({
-    color: 0x9a9a9a,
-    linewidth: 1, // most platforms ignore >1; keep as a hairline stroke
-  });
-  const line = new THREE.Line(geo, mat);
-  line.frustumCulled = false;
-  return { mesh: line, curve };
+  return { mesh: makeStrokeLine(sampled), curve };
 }
 
 function lerpRgb(a, b, t) {
@@ -540,6 +656,27 @@ function extractKeyColor(data) {
     };
   }
   return { r: 90, g: 90, b: 90 };
+}
+
+/** True mean RGB of opaque pixels — used for the intro flat swatches. */
+function averageColorFromPixels(data) {
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 200) continue;
+    r += data[i];
+    g += data[i + 1];
+    b += data[i + 2];
+    n++;
+  }
+  if (!n) return { r: 140, g: 140, b: 140 };
+  return {
+    r: Math.round(r / n),
+    g: Math.round(g / n),
+    b: Math.round(b / n),
+  };
 }
 
 /** Push extracted photo colour toward higher chroma / clearer value. */
@@ -790,6 +927,7 @@ async function getGrayBuffer(url) {
     cutB = 170;
   }
   const palette = extractDepthPalette(pixels, stretched, cutA, cutB);
+  const avgColor = averageColorFromPixels(pixels);
   const entry = {
     width: w,
     height: h,
@@ -799,6 +937,7 @@ async function getGrayBuffer(url) {
     cutA,
     cutB,
     palette,
+    avgColor,
     keyColor: palette.mid,
     closeness: estimateCloseness(gray, w, h),
     sourceUrl: url,
@@ -849,14 +988,14 @@ function captionForItem(item) {
   return String(phrase).toLowerCase();
 }
 
-/** Update accessible title: fixed scale, exclusion blend, variable weight. */
+/** Update centered narrative title: exclusion blend, variable light weight. */
 function setBrandWeightFromCloseness(closeness, text = titleText) {
   const el = els.pageTitle;
   if (!el) return;
   const dramatized = dramaticCloseness(closeness);
   const idx = Math.round(dramatized * (BRAND_WEIGHTS.length - 1));
   const weight = BRAND_WEIGHTS[clamp(idx, 0, BRAND_WEIGHTS.length - 1)];
-  const phrase = (text || TITLE_FALLBACK).trim() || TITLE_FALLBACK;
+  const phrase = (text || TITLE_FALLBACK).trim().toLowerCase() || TITLE_FALLBACK;
   const key = `${weight}|${phrase}`;
   if (key === lastTitleKey) return;
   lastTitleKey = key;
@@ -1011,14 +1150,27 @@ function setGroupPresence(group, amount) {
   const s = lerp(0.4, 1.05, a);
   group.scale.setScalar(s);
   group.traverse((obj) => {
-    if (!obj.isMesh || !obj.material) return;
+    if ((!obj.isMesh && !obj.isLine) || !obj.material) return;
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
     mats.forEach((m) => {
       m.transparent = true;
       m.opacity = a;
-      m.depthWrite = a > 0.55;
+      if ("depthWrite" in m) m.depthWrite = a > 0.55;
     });
   });
+}
+
+function applyMarkerVisualMode(group, mode) {
+  const flat = mode === "flat";
+  const swatch = group.userData.flatPlane;
+  if (swatch) swatch.visible = flat;
+  for (const p of group.userData.planes || []) {
+    p.visible = !flat;
+  }
+}
+
+function setAllMarkersVisualMode(mode) {
+  for (const g of interactives) applyMarkerVisualMode(g, mode);
 }
 
 async function rebuildMarkerVisuals(group) {
@@ -1026,6 +1178,7 @@ async function rebuildMarkerVisuals(group) {
   if (!item) return;
 
   clearMarkerVisuals(group);
+  group.userData.flatPlane = null;
 
   let facing = group.userData.facing;
   if (!facing) {
@@ -1042,10 +1195,29 @@ async function rebuildMarkerVisuals(group) {
 
   let closeness = 0.35;
   let keyColor = { r: 140, g: 140, b: 140 };
+  let avgColor = { r: 140, g: 140, b: 140 };
+  const showFlat = introActive;
   try {
     const gray = await getGrayBuffer(url);
     closeness = gray.closeness ?? 0.35;
     keyColor = gray.keyColor || keyColor;
+    avgColor = gray.avgColor || keyColor;
+
+    const flatPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(26, 19.5),
+      new THREE.MeshBasicMaterial({
+        color: new THREE.Color(avgColor.r / 255, avgColor.g / 255, avgColor.b / 255),
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      })
+    );
+    flatPlane.position.y = 18;
+    flatPlane.userData.flatSwatch = true;
+    flatPlane.visible = showFlat;
+    facing.add(flatPlane);
+    group.userData.flatPlane = flatPlane;
+
     const depthLayers = buildDepthLayerCanvases(gray);
     // Stack into the scene: foreground nearest the viewer, background furthest
     const stack = {
@@ -1070,6 +1242,7 @@ async function rebuildMarkerVisuals(group) {
       plane.userData.baseZ = layout.z;
       plane.userData.depthRole = role;
       plane.scale.set(layout.scale, layout.scale, 1);
+      plane.visible = !showFlat;
       facing.add(plane);
       planes.push(plane);
     });
@@ -1078,29 +1251,221 @@ async function rebuildMarkerVisuals(group) {
   }
 
   group.userData.planes = planes;
-  group.userData.timeT = timeNorm(item);
+  group.userData.timeT = timeTForItem(item);
   group.userData.closeness = closeness;
   group.userData.keyColor = keyColor;
+  group.userData.avgColor = avgColor;
 }
 
 async function makeMediaMarker(item, position) {
   const group = new THREE.Group();
   group.position.copy(position);
-  group.userData = { item, timeT: timeNorm(item) };
+  group.userData = {
+    item,
+    timeT: timeTForItem(item),
+    hikePos: position.clone(),
+  };
 
-  const pin = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.55, 0.55, 12, 8),
-    new THREE.MeshStandardMaterial({
-      color: 0xb0b0b0,
-      transparent: true,
-    })
+  // Same thin grey stroke as the altitude path — track → image plane
+  const stem = makeStrokeLine(
+    [new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 18, 0)],
+    { transparent: true }
   );
-  pin.position.y = 6;
-  pin.userData.keep = true;
-  group.add(pin);
+  stem.userData.keep = true;
+  stem.userData.stem = true;
+  group.add(stem);
+  group.userData.stem = stem;
 
   await rebuildMarkerVisuals(group);
   return group;
+}
+
+function markerStem(group) {
+  return group.userData.stem || null;
+}
+
+function setStemVisible(group, visible) {
+  const stem = markerStem(group);
+  if (stem) stem.visible = visible;
+}
+
+function restoreHikeLayout() {
+  for (const g of interactives) {
+    const home = g.userData.hikePos;
+    if (home) g.position.copy(home);
+    g.rotation.set(0, 0, 0);
+    g.scale.setScalar(1);
+    setStemVisible(g, true);
+    const facing = g.userData.facing;
+    if (facing) {
+      applyCaptureFacing(facing, headingForItem(g.userData.item));
+      facing.position.set(0, 0, 0);
+      facing.rotation.x = 0;
+      facing.rotation.z = 0;
+      facing.scale.setScalar(1);
+      for (const p of g.userData.planes || []) {
+        if (p.userData.baseZ != null) p.position.z = p.userData.baseZ;
+      }
+    }
+  }
+  if (trackMesh) trackMesh.visible = true;
+  restoreJourneyFog();
+}
+
+function enterTimelineMode() {
+  if (introActive) endIntro({ keepHint: true });
+  savedScrollY = window.scrollY;
+  document.documentElement.style.overflow = "hidden";
+  for (const g of interactives) setStemVisible(g, false);
+  if (trackMesh) trackMesh.visible = false;
+  if (scene?.fog) {
+    scene.fog.near = 40;
+    scene.fog.far = 280;
+  }
+  // Start near the current hike progress so the switch feels continuous
+  const n = Math.max(interactives.length - 1, 1);
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < interactives.length; i++) {
+    const d = Math.abs(interactives[i].userData.timeT - smoothProgress);
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  timelineFocus = best;
+  timelineFocusSmooth = best;
+  timelinePointerX = n <= 0 ? 0.5 : best / n;
+  if (els.scrollHint) {
+    els.scrollHint.textContent = "MOVE TO BROWSE";
+    els.scrollHint.classList.remove("is-gone");
+    hintHidden = false;
+  }
+  if (els.viewport) els.viewport.setAttribute("aria-label", "Timeline rolodex");
+}
+
+function exitTimelineMode() {
+  document.documentElement.style.overflow = "";
+  restoreHikeLayout();
+  window.scrollTo(0, savedScrollY);
+  scrollProgress = readScrollProgress();
+  smoothProgress = scrollProgress;
+  if (els.scrollHint) {
+    els.scrollHint.textContent = "SCROLL TO TRAVEL PATH";
+    if (scrollProgress > 0.01) {
+      els.scrollHint.classList.add("is-gone");
+      hintHidden = true;
+    } else {
+      els.scrollHint.classList.remove("is-gone");
+      hintHidden = false;
+    }
+  }
+  if (els.viewport) els.viewport.setAttribute("aria-label", "Hike through time");
+}
+
+function setViewMode(mode) {
+  if (mode !== "elevation" && mode !== "timeline") return;
+  if (mode === viewMode) return;
+  viewMode = mode;
+  els.experience?.setAttribute("data-mode", mode);
+  const isTimeline = mode === "timeline";
+  if (els.modeToggle) {
+    els.modeToggle.setAttribute("aria-pressed", isTimeline ? "true" : "false");
+    els.modeToggle.textContent = isTimeline ? "ELEVATION" : "TIMELINE";
+    els.modeToggle.setAttribute(
+      "aria-label",
+      isTimeline ? "Switch to elevation view" : "Switch to timeline view"
+    );
+  }
+  if (isTimeline) enterTimelineMode();
+  else exitTimelineMode();
+}
+
+function toggleViewMode() {
+  setViewMode(viewMode === "elevation" ? "timeline" : "elevation");
+}
+
+function timelineIndexFromPointer(nx) {
+  const n = interactives.length;
+  if (n <= 1) return 0;
+  return clamp(nx, 0, 1) * (n - 1);
+}
+
+function onTimelinePointer(e) {
+  if (viewMode !== "timeline" || !els.viewport) return;
+  const rect = els.viewport.getBoundingClientRect();
+  if (rect.width <= 0) return;
+  timelinePointerX = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+  timelineFocus = timelineIndexFromPointer(timelinePointerX);
+  if (!hintHidden) hideHint();
+  ensureAudioCtx();
+}
+
+function onTimelineWheel(e) {
+  if (viewMode !== "timeline") return;
+  e.preventDefault();
+  const n = Math.max(interactives.length - 1, 1);
+  timelineFocus = clamp(timelineFocus + e.deltaY * 0.01, 0, n);
+  timelinePointerX = timelineFocus / n;
+  if (!hintHidden) hideHint();
+  ensureAudioCtx();
+}
+
+function updateTimeline(clockSec = 0) {
+  if (!camera || !interactives.length) return;
+
+  timelineFocusSmooth += (timelineFocus - timelineFocusSmooth) * 0.14;
+
+  const focusIdx = Math.round(clamp(timelineFocusSmooth, 0, interactives.length - 1));
+  const active = interactives[focusIdx];
+  const activeItem = active?.userData?.item;
+  const progress = active?.userData?.timeT ?? 0;
+
+  // Fixed camera looking into the flat card rail (cards orbit around x=0)
+  _camPos.set(0, 14, 78);
+  _look.set(0, 12, 0);
+  camera.position.lerp(_camPos, 0.18);
+  camera.lookAt(_look);
+
+  let closeSum = 0;
+  let closeW = 0;
+
+  for (let i = 0; i < interactives.length; i++) {
+    const g = interactives[i];
+    const d = i - timelineFocusSmooth;
+    const abs = Math.abs(d);
+    const x = d * TIMELINE_CARD_GAP;
+    const z = -Math.min(abs, 10) * TIMELINE_RECED;
+    const y = Math.sin(Math.min(abs, 4) * 0.35) * -1.2;
+
+    g.position.set(x, y, z);
+    g.rotation.set(0, 0, 0);
+
+    const facing = g.userData.facing;
+    if (facing) {
+      const yaw = -Math.sign(d || 1) * Math.min(abs, 4) * TIMELINE_YAW;
+      facing.rotation.set(0, abs < 0.02 ? 0 : yaw, 0);
+      facing.scale.setScalar(1);
+    }
+
+    // Show a local neighbourhood so the deck reads as a rolodex, not a crowd
+    const amount = Math.exp((-abs * abs) / (2 * 2.1 * 2.1));
+    setGroupPresence(g, amount);
+    // Keep facing controlled by the rolodex (sound motion would reset yaw)
+
+    if (amount > 0.05) {
+      closeSum += (g.userData.closeness ?? 0.35) * amount;
+      closeW += amount;
+    }
+  }
+
+  updateCornerMeta(clamp(progress, 0, 1), activeItem);
+  syncSoundPlayback(clamp(progress, 0, 1));
+  applyJourneyAtmosphere(clamp(progress, 0, 1));
+
+  const targetClose = closeW > 0 ? closeSum / closeW : smoothCloseness;
+  smoothCloseness += (targetClose - smoothCloseness) * 0.22;
+  setBrandWeightFromCloseness(smoothCloseness, captionForItem(activeItem));
 }
 
 function readScrollProgress() {
@@ -1117,7 +1482,136 @@ function hideHint() {
   els.scrollHint?.classList.add("is-gone");
 }
 
+function trackSampleAtProgress(progress) {
+  const track = data?.gpx?.track;
+  if (!track?.length) return null;
+  const u = clamp(progress, 0, 1);
+  const idx = u * (track.length - 1);
+  const i0 = Math.floor(idx);
+  const i1 = Math.min(track.length - 1, i0 + 1);
+  const f = idx - i0;
+  const a = track[i0];
+  const b = track[i1];
+  return {
+    t: a.t * (1 - f) + b.t * f,
+    ele:
+      a.ele != null && b.ele != null
+        ? a.ele * (1 - f) + b.ele * f
+        : a.ele ?? b.ele ?? null,
+    lat: a.lat * (1 - f) + b.lat * f,
+    lon: a.lon * (1 - f) + b.lon * f,
+  };
+}
+
+function formatCoord(value, posHem, negHem, digits = 5) {
+  if (value == null || !Number.isFinite(value)) return "";
+  const hem = value >= 0 ? posHem : negHem;
+  return `${Math.abs(value).toFixed(digits)}°${hem}`;
+}
+
+function haversineM(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const dφ = ((lat2 - lat1) * Math.PI) / 180;
+  const dλ = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dφ / 2) ** 2 +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
+
+function buildTrackDistances(track) {
+  if (!track?.length) return [];
+  const dist = new Float64Array(track.length);
+  dist[0] = 0;
+  for (let i = 1; i < track.length; i++) {
+    const a = track[i - 1];
+    const b = track[i];
+    const flat = haversineM(a.lat, a.lon, b.lat, b.lon);
+    const dEle =
+      a.ele != null && b.ele != null ? b.ele - a.ele : 0;
+    dist[i] = dist[i - 1] + Math.hypot(flat, dEle);
+  }
+  return dist;
+}
+
+function distanceAtProgress(progress) {
+  if (!trackDistances.length) return 0;
+  const u = clamp(progress, 0, 1);
+  const idx = u * (trackDistances.length - 1);
+  const i0 = Math.floor(idx);
+  const i1 = Math.min(trackDistances.length - 1, i0 + 1);
+  const f = idx - i0;
+  return trackDistances[i0] * (1 - f) + trackDistances[i1] * f;
+}
+
+function stepsAtProgress(progress) {
+  return Math.max(0, Math.round(distanceAtProgress(progress) / STEP_STRIDE_M));
+}
+
+function updateCornerMeta(progress, activeItem) {
+  let ts = null;
+  let ele = null;
+  let lat = null;
+  let lon = null;
+
+  if (
+    activeItem &&
+    !activeItem.beyond &&
+    activeItem.ts != null &&
+    Math.abs(timeTForItem(activeItem) - progress) < TIME_WINDOW * 1.8
+  ) {
+    ts = activeItem.ts;
+    ele = activeItem.ele;
+    lat = activeItem.lat;
+    lon = activeItem.lon;
+  } else {
+    const sample = trackSampleAtProgress(progress);
+    if (sample) {
+      ts = sample.t;
+      ele = sample.ele;
+      lat = sample.lat;
+      lon = sample.lon;
+    }
+  }
+
+  const timeVal = ts != null ? fmtMetaTime.format(new Date(ts * 1000)) : "";
+  const eleVal = ele != null ? `${Math.round(ele)} m` : "";
+  const latVal = formatCoord(lat, "N", "S");
+  const lonVal = formatCoord(lon, "E", "W");
+  const locVal =
+    latVal && lonVal ? `${latVal}  ${lonVal}` : latVal || lonVal || "";
+  const stepsVal = stepsAtProgress(progress).toLocaleString();
+
+  if (els.metaTime) {
+    els.metaTime.textContent = metaLabelsVisible
+      ? timeVal
+        ? `TIME ${timeVal}`
+        : "TIME"
+      : timeVal || "—";
+  }
+  if (els.metaAltitude) {
+    els.metaAltitude.textContent = metaLabelsVisible
+      ? eleVal
+        ? `ELEVATION ${eleVal}`
+        : "ELEVATION"
+      : eleVal || "—";
+  }
+  if (els.metaLocation) {
+    els.metaLocation.textContent = metaLabelsVisible
+      ? latVal && lonVal
+        ? `LAT ${latVal}  LON ${lonVal}`
+        : "LAT LON"
+      : locVal || "—";
+  }
+  if (els.metaSteps) {
+    els.metaSteps.textContent = `${stepsVal} STEPS`;
+  }
+}
+
 function updateJourney(progress, clockSec = 0) {
+  if (viewMode !== "elevation") return;
   if (!trackCurve || !camera) return;
 
   const u = clamp(progress, 0, 0.999);
@@ -1146,22 +1640,22 @@ function updateJourney(progress, clockSec = 0) {
     }
   }
 
-  const activeCaption = captionForItem(best?.userData?.item);
+  const activeItem = best?.userData?.item;
+  const activeCaption = captionForItem(activeItem);
+  updateCornerMeta(progress, activeItem);
 
+  let focusEase = 0;
   if (best && bestD < TIME_WINDOW * 1.8) {
     const blend = clamp(1 - bestD / (TIME_WINDOW * 1.8), 0, 1);
-    const ease = blend * blend * (3 - 2 * blend);
+    focusEase = blend * blend * (3 - 2 * blend);
     const heading = headingForItem(best.userData.item);
     const θ = THREE.MathUtils.degToRad(heading);
-    // Stand where the photographer stood: behind the plane along -look
-    const face = _tmp.set(Math.sin(θ), 0, -Math.cos(θ));
+    // Stand on the capture axis, looking straight at the plane centre
+    const face = _tmp.set(Math.sin(θ), 0, -Math.cos(θ)).normalize();
     const planeCenter = best.position.clone().addScaledVector(_up, 18);
-    const viewFrom = planeCenter
-      .clone()
-      .addScaledVector(face, -48)
-      .addScaledVector(_up, 10);
-    _camPos.lerp(viewFrom, ease * 0.85);
-    _look.lerp(planeCenter.clone().addScaledVector(face, 12), ease * 0.9);
+    const viewFrom = planeCenter.clone().addScaledVector(face, -52);
+    _camPos.lerp(viewFrom, focusEase * 0.95);
+    _look.lerp(planeCenter, focusEase * 0.98);
   }
 
   camera.position.lerp(_camPos, 0.12);
@@ -1178,6 +1672,24 @@ function updateJourney(progress, clockSec = 0) {
     if (amount > 0.04) {
       closeSum += (g.userData.closeness ?? 0.35) * amount;
       closeW += amount;
+    }
+  }
+
+  // Keep the focused card page-centred and facing the viewer
+  if (best && focusEase > 0.02) {
+    const facing = best.userData.facing;
+    if (facing) {
+      const px = best.position.x;
+      const pz = best.position.z;
+      const dx = camera.position.x - px;
+      const dz = camera.position.z - pz;
+      if (dx * dx + dz * dz > 1e-6) {
+        const billboardYaw = Math.atan2(dx, dz);
+        const heading = headingForItem(best.userData.item);
+        const θ = THREE.MathUtils.degToRad(heading);
+        const captureYaw = Math.atan2(Math.sin(θ), -Math.cos(θ));
+        facing.rotation.y = lerp(captureYaw, billboardYaw, focusEase);
+      }
     }
   }
 
@@ -1225,6 +1737,7 @@ async function buildWorld() {
   altitudeTemplate = buildAltitudeTemplate(gpx.track, 64);
   const { project } = toLocalFrame(gpx.track);
   trackPoints = gpx.track.map((p) => project(p.lat, p.lon, p.ele));
+  trackDistances = buildTrackDistances(gpx.track);
 
   const built = makeTrackMesh(trackPoints);
   trackMesh = built.mesh;
@@ -1235,7 +1748,7 @@ async function buildWorld() {
   interactives = [];
   await Promise.all(
     samples.map(async (item) => {
-      const pos = project(item.lat, item.lon, item.ele);
+      const pos = positionForItem(item, project, trackPoints, trackCurve);
       const marker = await makeMediaMarker(item, pos);
       scene.add(marker);
       interactives.push(marker);
@@ -1245,7 +1758,9 @@ async function buildWorld() {
   interactives.sort((a, b) => a.userData.timeT - b.userData.timeT);
   calibrateClosenessExtent(interactives);
 
-  journeyColors = buildJourneyColorField(interactives);
+  journeyColors = buildJourneyColorField(
+    interactives.filter((g) => !g.userData.item?.beyond)
+  );
   if (journeyColors.length) {
     smoothJourneyColor = { ...sampleJourneyColor(journeyColors, 0) };
   }
@@ -1256,7 +1771,76 @@ async function buildWorld() {
   beginAtTimelineStart();
 }
 
-/** Always open at the trailhead — ignore restored scroll position. */
+function computeOverviewBounds() {
+  const box = new THREE.Box3();
+  for (const p of trackPoints) box.expandByPoint(p);
+  for (const g of interactives) {
+    const home = g.userData.hikePos || g.position;
+    box.expandByPoint(home);
+  }
+  if (box.isEmpty()) {
+    overviewCenter.set(0, 80, 0);
+    overviewRadius = 400;
+    return;
+  }
+  box.getCenter(overviewCenter);
+  const size = box.getSize(_tmp);
+  overviewRadius = Math.max(size.length() * 0.42, 180);
+}
+
+/** Slow orbit of the full path + media constellation before the hike begins. */
+function updateOverview(clockSec) {
+  if (!camera) return;
+
+  if (scene?.fog) {
+    scene.fog.near = overviewRadius * 0.9;
+    scene.fog.far = overviewRadius * 4.2;
+  }
+
+  const angle = clockSec * 0.11;
+  const elev = 0.4;
+  const r = overviewRadius * 1.45;
+  const cosE = Math.cos(elev);
+  _camPos.set(
+    overviewCenter.x + Math.cos(angle) * r * cosE,
+    overviewCenter.y + r * Math.sin(elev) + overviewRadius * 0.1,
+    overviewCenter.z + Math.sin(angle) * r * cosE
+  );
+  _look.copy(overviewCenter).addScaledVector(_up, overviewRadius * 0.06);
+
+  camera.position.lerp(_camPos, 0.045);
+  camera.lookAt(_look);
+
+  for (const g of interactives) {
+    const home = g.userData.hikePos;
+    if (home) g.position.copy(home);
+    setStemVisible(g, true);
+    setGroupPresence(g, 0.48);
+    applySoundMotion(g, 0, clockSec);
+  }
+  if (trackMesh) trackMesh.visible = true;
+
+  updateCornerMeta(0, null);
+  applyJourneyAtmosphere(0.45);
+  setBrandWeightFromCloseness(0.35, TITLE_FALLBACK);
+}
+
+function restoreJourneyFog() {
+  if (!scene?.fog) return;
+  scene.fog.near = 500;
+  scene.fog.far = 3200;
+}
+
+function endIntro({ keepHint = false } = {}) {
+  if (!introActive) return;
+  introActive = false;
+  metaLabelsVisible = false;
+  restoreJourneyFog();
+  setAllMarkersVisualMode("layers");
+  if (!keepHint) hideHint();
+}
+
+/** Open in overview orbit — scroll ends the intro and starts the journey. */
 function beginAtTimelineStart() {
   if ("scrollRestoration" in history) {
     history.scrollRestoration = "manual";
@@ -1264,14 +1848,26 @@ function beginAtTimelineStart() {
   window.scrollTo(0, 0);
   scrollProgress = 0;
   smoothProgress = 0;
-  const startItem = interactives[0]?.userData?.item;
-  titleText = captionForItem(startItem);
-  updateJourney(0, performance.now() * 0.001);
+  introActive = true;
+  metaLabelsVisible = true;
+  titleText = TITLE_FALLBACK;
+  computeOverviewBounds();
+  setAllMarkersVisualMode("flat");
+
+  const clockSec = performance.now() * 0.001;
+  updateOverview(clockSec);
   if (camera) {
     camera.position.copy(_camPos);
     camera.lookAt(_look);
   }
-  setBrandWeightFromCloseness(smoothCloseness, titleText);
+  setBrandWeightFromCloseness(0.35, titleText);
+
+  if (els.scrollHint) {
+    els.scrollHint.textContent = "SCROLL TO TRAVEL PATH";
+    els.scrollHint.classList.remove("is-gone");
+    hintHidden = false;
+  }
+
   // Re-assert after layout (fonts / scroll-rail height) settles
   requestAnimationFrame(() => {
     window.scrollTo(0, 0);
@@ -1283,8 +1879,14 @@ function beginAtTimelineStart() {
 function animate() {
   frameId = requestAnimationFrame(animate);
   const clockSec = performance.now() * 0.001;
-  smoothProgress += (scrollProgress - smoothProgress) * 0.085;
-  updateJourney(smoothProgress, clockSec);
+  if (viewMode === "timeline") {
+    updateTimeline(clockSec);
+  } else if (introActive) {
+    updateOverview(clockSec);
+  } else {
+    smoothProgress += (scrollProgress - smoothProgress) * 0.085;
+    updateJourney(smoothProgress, clockSec);
+  }
   renderer.render(scene, camera);
 }
 
@@ -1298,9 +1900,27 @@ function onResize() {
 }
 
 function onScroll() {
+  if (viewMode !== "elevation") return;
   scrollProgress = readScrollProgress();
-  if (scrollProgress > 0.01) hideHint();
+  if (introActive && scrollProgress > 0.004) {
+    endIntro();
+  }
+  if (scrollProgress > 0.01) {
+    hideHint();
+    if (metaLabelsVisible) metaLabelsVisible = false;
+  }
   ensureAudioCtx();
+}
+
+function bindModeControls() {
+  els.modeToggle?.addEventListener("click", () => {
+    ensureAudioCtx();
+    toggleViewMode();
+  });
+  els.viewport?.addEventListener("pointermove", onTimelinePointer, {
+    passive: true,
+  });
+  els.viewport?.addEventListener("wheel", onTimelineWheel, { passive: false });
 }
 
 async function boot() {
@@ -1326,6 +1946,7 @@ async function boot() {
   await loadBrandFonts();
   initScene();
   await buildWorld();
+  bindModeControls();
   animate();
   window.addEventListener("resize", onResize);
   window.addEventListener("scroll", onScroll, { passive: true });
