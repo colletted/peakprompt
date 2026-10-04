@@ -573,9 +573,9 @@ function screentimeAssetItems() {
   return [
     {
       id: "screentime-overview",
-      name: "IMG_4403.PNG",
-      path: "assets/hike-1/screentime/IMG_4403.PNG",
-      thumb: "assets/hike-1/screentime/IMG_4403.PNG",
+      name: "IMG_4403.jpg",
+      path: "assets/hike-1/screentime/IMG_4403.jpg",
+      thumb: "assets/hike-1/screentime/IMG_4403.jpg",
       kind: "image",
       source: "screentime",
       onTrack: false,
@@ -585,9 +585,9 @@ function screentimeAssetItems() {
     },
     {
       id: "screentime-pickups",
-      name: "IMG_4404.PNG",
-      path: "assets/hike-1/screentime/IMG_4404.PNG",
-      thumb: "assets/hike-1/screentime/IMG_4404.PNG",
+      name: "IMG_4404.jpg",
+      path: "assets/hike-1/screentime/IMG_4404.jpg",
+      thumb: "assets/hike-1/screentime/IMG_4404.jpg",
       kind: "image",
       source: "screentime",
       onTrack: false,

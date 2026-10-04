@@ -2081,9 +2081,9 @@
       "orientation": 1
     },
     {
-      "id": "iphone-back_8B2F5360-63CE-48AE-9323-5AEBAD8A0192.HEIC",
-      "name": "back_8B2F5360-63CE-48AE-9323-5AEBAD8A0192.HEIC",
-      "path": "assets/hike-1/iphone/back_8B2F5360-63CE-48AE-9323-5AEBAD8A0192.HEIC",
+      "id": "iphone-back_8B2F5360-63CE-48AE-9323-5AEBAD8A0192.jpg",
+      "name": "back_8B2F5360-63CE-48AE-9323-5AEBAD8A0192.jpg",
+      "path": "assets/hike-1/iphone/back_8B2F5360-63CE-48AE-9323-5AEBAD8A0192.jpg",
       "thumb": "thumbs/iphone_back_8B2F5360-63CE-48AE-9323-5AEBAD8A0192.jpg",
       "source": "iphone",
       "kind": "image",
@@ -2097,9 +2097,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-front_9B862295-24DD-4970-B640-76D6704BAEC2.HEIC",
-      "name": "front_9B862295-24DD-4970-B640-76D6704BAEC2.HEIC",
-      "path": "assets/hike-1/iphone/front_9B862295-24DD-4970-B640-76D6704BAEC2.HEIC",
+      "id": "iphone-front_9B862295-24DD-4970-B640-76D6704BAEC2.jpg",
+      "name": "front_9B862295-24DD-4970-B640-76D6704BAEC2.jpg",
+      "path": "assets/hike-1/iphone/front_9B862295-24DD-4970-B640-76D6704BAEC2.jpg",
       "thumb": "thumbs/iphone_front_9B862295-24DD-4970-B640-76D6704BAEC2.jpg",
       "source": "iphone",
       "kind": "image",
@@ -2455,9 +2455,9 @@
       "orientation": 1
     },
     {
-      "id": "iphone-back_AB2D8F55-5BB3-4972-A779-74826FD3B9F4.HEIC",
-      "name": "back_AB2D8F55-5BB3-4972-A779-74826FD3B9F4.HEIC",
-      "path": "assets/hike-1/iphone/back_AB2D8F55-5BB3-4972-A779-74826FD3B9F4.HEIC",
+      "id": "iphone-back_AB2D8F55-5BB3-4972-A779-74826FD3B9F4.jpg",
+      "name": "back_AB2D8F55-5BB3-4972-A779-74826FD3B9F4.jpg",
+      "path": "assets/hike-1/iphone/back_AB2D8F55-5BB3-4972-A779-74826FD3B9F4.jpg",
       "thumb": "thumbs/iphone_back_AB2D8F55-5BB3-4972-A779-74826FD3B9F4.jpg",
       "source": "iphone",
       "kind": "image",
@@ -2471,9 +2471,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-combined_4CB7105F-12DE-4522-8022-AFC0FF9733F2.HEIC",
-      "name": "combined_4CB7105F-12DE-4522-8022-AFC0FF9733F2.HEIC",
-      "path": "assets/hike-1/iphone/combined_4CB7105F-12DE-4522-8022-AFC0FF9733F2.HEIC",
+      "id": "iphone-combined_4CB7105F-12DE-4522-8022-AFC0FF9733F2.jpg",
+      "name": "combined_4CB7105F-12DE-4522-8022-AFC0FF9733F2.jpg",
+      "path": "assets/hike-1/iphone/combined_4CB7105F-12DE-4522-8022-AFC0FF9733F2.jpg",
       "thumb": "thumbs/iphone_combined_4CB7105F-12DE-4522-8022-AFC0FF9733F2.jpg",
       "source": "iphone",
       "kind": "image",
@@ -2487,9 +2487,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-front_F667B349-CF81-49F7-BC62-CD9781DD6575.HEIC",
-      "name": "front_F667B349-CF81-49F7-BC62-CD9781DD6575.HEIC",
-      "path": "assets/hike-1/iphone/front_F667B349-CF81-49F7-BC62-CD9781DD6575.HEIC",
+      "id": "iphone-front_F667B349-CF81-49F7-BC62-CD9781DD6575.jpg",
+      "name": "front_F667B349-CF81-49F7-BC62-CD9781DD6575.jpg",
+      "path": "assets/hike-1/iphone/front_F667B349-CF81-49F7-BC62-CD9781DD6575.jpg",
       "thumb": "thumbs/iphone_front_F667B349-CF81-49F7-BC62-CD9781DD6575.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3170,9 +3170,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-back_1C1EE022-DEE9-46C1-87C2-1ED662E6E5DE.HEIC",
-      "name": "back_1C1EE022-DEE9-46C1-87C2-1ED662E6E5DE.HEIC",
-      "path": "assets/hike-1/iphone/back_1C1EE022-DEE9-46C1-87C2-1ED662E6E5DE.HEIC",
+      "id": "iphone-back_1C1EE022-DEE9-46C1-87C2-1ED662E6E5DE.jpg",
+      "name": "back_1C1EE022-DEE9-46C1-87C2-1ED662E6E5DE.jpg",
+      "path": "assets/hike-1/iphone/back_1C1EE022-DEE9-46C1-87C2-1ED662E6E5DE.jpg",
       "thumb": "thumbs/iphone_back_1C1EE022-DEE9-46C1-87C2-1ED662E6E5DE.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3186,9 +3186,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-front_795F7F72-D74B-4FA4-BFAE-455B8753F203.HEIC",
-      "name": "front_795F7F72-D74B-4FA4-BFAE-455B8753F203.HEIC",
-      "path": "assets/hike-1/iphone/front_795F7F72-D74B-4FA4-BFAE-455B8753F203.HEIC",
+      "id": "iphone-front_795F7F72-D74B-4FA4-BFAE-455B8753F203.jpg",
+      "name": "front_795F7F72-D74B-4FA4-BFAE-455B8753F203.jpg",
+      "path": "assets/hike-1/iphone/front_795F7F72-D74B-4FA4-BFAE-455B8753F203.jpg",
       "thumb": "thumbs/iphone_front_795F7F72-D74B-4FA4-BFAE-455B8753F203.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3202,9 +3202,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-back_9DBDC97D-D8BE-43BF-9774-0619173B8351.HEIC",
-      "name": "back_9DBDC97D-D8BE-43BF-9774-0619173B8351.HEIC",
-      "path": "assets/hike-1/iphone/back_9DBDC97D-D8BE-43BF-9774-0619173B8351.HEIC",
+      "id": "iphone-back_9DBDC97D-D8BE-43BF-9774-0619173B8351.jpg",
+      "name": "back_9DBDC97D-D8BE-43BF-9774-0619173B8351.jpg",
+      "path": "assets/hike-1/iphone/back_9DBDC97D-D8BE-43BF-9774-0619173B8351.jpg",
       "thumb": "thumbs/iphone_back_9DBDC97D-D8BE-43BF-9774-0619173B8351.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3218,9 +3218,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-combined_99F960E9-45F9-4CD4-AFD6-FC2FF2E55F9A.HEIC",
-      "name": "combined_99F960E9-45F9-4CD4-AFD6-FC2FF2E55F9A.HEIC",
-      "path": "assets/hike-1/iphone/combined_99F960E9-45F9-4CD4-AFD6-FC2FF2E55F9A.HEIC",
+      "id": "iphone-combined_99F960E9-45F9-4CD4-AFD6-FC2FF2E55F9A.jpg",
+      "name": "combined_99F960E9-45F9-4CD4-AFD6-FC2FF2E55F9A.jpg",
+      "path": "assets/hike-1/iphone/combined_99F960E9-45F9-4CD4-AFD6-FC2FF2E55F9A.jpg",
       "thumb": "thumbs/iphone_combined_99F960E9-45F9-4CD4-AFD6-FC2FF2E55F9A.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3234,9 +3234,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-front_B94E88EF-F2CB-430A-B798-1E4C7D978C57.HEIC",
-      "name": "front_B94E88EF-F2CB-430A-B798-1E4C7D978C57.HEIC",
-      "path": "assets/hike-1/iphone/front_B94E88EF-F2CB-430A-B798-1E4C7D978C57.HEIC",
+      "id": "iphone-front_B94E88EF-F2CB-430A-B798-1E4C7D978C57.jpg",
+      "name": "front_B94E88EF-F2CB-430A-B798-1E4C7D978C57.jpg",
+      "path": "assets/hike-1/iphone/front_B94E88EF-F2CB-430A-B798-1E4C7D978C57.jpg",
       "thumb": "thumbs/iphone_front_B94E88EF-F2CB-430A-B798-1E4C7D978C57.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3250,9 +3250,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-back_E9E78B17-D8D2-4328-A095-61503D416C12.HEIC",
-      "name": "back_E9E78B17-D8D2-4328-A095-61503D416C12.HEIC",
-      "path": "assets/hike-1/iphone/back_E9E78B17-D8D2-4328-A095-61503D416C12.HEIC",
+      "id": "iphone-back_E9E78B17-D8D2-4328-A095-61503D416C12.jpg",
+      "name": "back_E9E78B17-D8D2-4328-A095-61503D416C12.jpg",
+      "path": "assets/hike-1/iphone/back_E9E78B17-D8D2-4328-A095-61503D416C12.jpg",
       "thumb": "thumbs/iphone_back_E9E78B17-D8D2-4328-A095-61503D416C12.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3266,9 +3266,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-combined_8138FA8F-BBEE-4B24-A563-630C4CFE223C.HEIC",
-      "name": "combined_8138FA8F-BBEE-4B24-A563-630C4CFE223C.HEIC",
-      "path": "assets/hike-1/iphone/combined_8138FA8F-BBEE-4B24-A563-630C4CFE223C.HEIC",
+      "id": "iphone-combined_8138FA8F-BBEE-4B24-A563-630C4CFE223C.jpg",
+      "name": "combined_8138FA8F-BBEE-4B24-A563-630C4CFE223C.jpg",
+      "path": "assets/hike-1/iphone/combined_8138FA8F-BBEE-4B24-A563-630C4CFE223C.jpg",
       "thumb": "thumbs/iphone_combined_8138FA8F-BBEE-4B24-A563-630C4CFE223C.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3282,9 +3282,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-front_D13016FD-4F1F-437A-A2B0-63DF41DA6125.HEIC",
-      "name": "front_D13016FD-4F1F-437A-A2B0-63DF41DA6125.HEIC",
-      "path": "assets/hike-1/iphone/front_D13016FD-4F1F-437A-A2B0-63DF41DA6125.HEIC",
+      "id": "iphone-front_D13016FD-4F1F-437A-A2B0-63DF41DA6125.jpg",
+      "name": "front_D13016FD-4F1F-437A-A2B0-63DF41DA6125.jpg",
+      "path": "assets/hike-1/iphone/front_D13016FD-4F1F-437A-A2B0-63DF41DA6125.jpg",
       "thumb": "thumbs/iphone_front_D13016FD-4F1F-437A-A2B0-63DF41DA6125.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3298,9 +3298,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-back_0F716B6B-9F98-4A93-A7BB-63DE4986E31F.HEIC",
-      "name": "back_0F716B6B-9F98-4A93-A7BB-63DE4986E31F.HEIC",
-      "path": "assets/hike-1/iphone/back_0F716B6B-9F98-4A93-A7BB-63DE4986E31F.HEIC",
+      "id": "iphone-back_0F716B6B-9F98-4A93-A7BB-63DE4986E31F.jpg",
+      "name": "back_0F716B6B-9F98-4A93-A7BB-63DE4986E31F.jpg",
+      "path": "assets/hike-1/iphone/back_0F716B6B-9F98-4A93-A7BB-63DE4986E31F.jpg",
       "thumb": "thumbs/iphone_back_0F716B6B-9F98-4A93-A7BB-63DE4986E31F.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3314,9 +3314,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-combined_AD9178EA-614E-4A9D-9BE9-12B6EF73ECC2.HEIC",
-      "name": "combined_AD9178EA-614E-4A9D-9BE9-12B6EF73ECC2.HEIC",
-      "path": "assets/hike-1/iphone/combined_AD9178EA-614E-4A9D-9BE9-12B6EF73ECC2.HEIC",
+      "id": "iphone-combined_AD9178EA-614E-4A9D-9BE9-12B6EF73ECC2.jpg",
+      "name": "combined_AD9178EA-614E-4A9D-9BE9-12B6EF73ECC2.jpg",
+      "path": "assets/hike-1/iphone/combined_AD9178EA-614E-4A9D-9BE9-12B6EF73ECC2.jpg",
       "thumb": "thumbs/iphone_combined_AD9178EA-614E-4A9D-9BE9-12B6EF73ECC2.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3330,9 +3330,9 @@
       "trackDeltaSec": null
     },
     {
-      "id": "iphone-front_765FA27D-6648-4DCC-8BA4-1B8E5C1A036C.HEIC",
-      "name": "front_765FA27D-6648-4DCC-8BA4-1B8E5C1A036C.HEIC",
-      "path": "assets/hike-1/iphone/front_765FA27D-6648-4DCC-8BA4-1B8E5C1A036C.HEIC",
+      "id": "iphone-front_765FA27D-6648-4DCC-8BA4-1B8E5C1A036C.jpg",
+      "name": "front_765FA27D-6648-4DCC-8BA4-1B8E5C1A036C.jpg",
+      "path": "assets/hike-1/iphone/front_765FA27D-6648-4DCC-8BA4-1B8E5C1A036C.jpg",
       "thumb": "thumbs/iphone_front_765FA27D-6648-4DCC-8BA4-1B8E5C1A036C.jpg",
       "source": "iphone",
       "kind": "image",
@@ -3363,9 +3363,9 @@
       "orientation": 1
     },
     {
-      "id": "iphone-IMG_3759.PNG",
-      "name": "IMG_3759.PNG",
-      "path": "assets/hike-1/iphone/IMG_3759.PNG",
+      "id": "iphone-IMG_3759.jpg",
+      "name": "IMG_3759.jpg",
+      "path": "assets/hike-1/iphone/IMG_3759.jpg",
       "thumb": "thumbs/iphone_IMG_3759.jpg",
       "source": "iphone",
       "kind": "image",
@@ -6262,9 +6262,9 @@
       "orientation": 1
     },
     {
-      "id": "iphone-IMG_3832.PNG",
-      "name": "IMG_3832.PNG",
-      "path": "assets/hike-1/iphone/IMG_3832.PNG",
+      "id": "iphone-IMG_3832.jpg",
+      "name": "IMG_3832.jpg",
+      "path": "assets/hike-1/iphone/IMG_3832.jpg",
       "thumb": "thumbs/iphone_IMG_3832.jpg",
       "source": "iphone",
       "kind": "image",
@@ -12810,9 +12810,9 @@
       "orientation": 1
     },
     {
-      "id": "iphone-IMG_4085.PNG",
-      "name": "IMG_4085.PNG",
-      "path": "assets/hike-1/iphone/IMG_4085.PNG",
+      "id": "iphone-IMG_4085.jpg",
+      "name": "IMG_4085.jpg",
+      "path": "assets/hike-1/iphone/IMG_4085.jpg",
       "thumb": "thumbs/iphone_IMG_4085.jpg",
       "source": "iphone",
       "kind": "image",
@@ -20149,9 +20149,9 @@
       "orientation": 6
     },
     {
-      "id": "iphone-IMG_4306.PNG",
-      "name": "IMG_4306.PNG",
-      "path": "assets/hike-1/iphone/IMG_4306.PNG",
+      "id": "iphone-IMG_4306.jpg",
+      "name": "IMG_4306.jpg",
+      "path": "assets/hike-1/iphone/IMG_4306.jpg",
       "thumb": "thumbs/iphone_IMG_4306.jpg",
       "source": "iphone",
       "kind": "image",

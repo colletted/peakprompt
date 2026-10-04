@@ -1,5 +1,11 @@
-assets/
+.DS_Store
 
-*.jpg
-
-thumbs/
+# Keep fonts, compressed hike stills, and thumbs for GitHub Pages.
+# Omit bulky camera video / audio originals (app uses image thumbs).
+assets/hike-1/**/*.mov
+assets/hike-1/**/*.MOV
+assets/hike-1/**/*.mp4
+assets/hike-1/**/*.MP4
+assets/hike-1/**/*.m4a
+assets/hike-1/**/*.M4A
+audio/
