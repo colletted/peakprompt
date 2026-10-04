@@ -151,14 +151,6 @@ html.is-wheeling .scroll-hint {
   cursor: default;
 }
 
-.experience[data-view="outliers"] .viewport {
-  cursor: grab;
-}
-
-.experience[data-view="outliers"] .viewport:active {
-  cursor: grabbing;
-}
-
 .experience[data-view="combine"] .viewport {
   cursor: grab;
 }
@@ -190,7 +182,6 @@ html.is-wheel-clustering .experience[data-view="combine"] .viewport {
   pointer-events: none;
 }
 
-.experience[data-view="outliers"] .scroll-rail,
 .experience[data-view="combine"] .scroll-rail {
   height: 0;
 }
@@ -345,17 +336,18 @@ html.is-inspecting .journey-lyric-bubble {
   opacity: 1;
 }
 
-.experience[data-view="outliers"] .journey-lyrics,
 .experience[data-view="combine"] .journey-lyrics {
   opacity: 0;
 }
 
-.experience[data-view="outliers"] .journey-lyrics.is-visible,
 .experience[data-view="combine"] .journey-lyrics.is-visible {
   opacity: 1;
 }
 
 .journey-lyrics.is-view-intro {
+  top: calc(clamp(1.25rem, 4vh, 2.5rem) + 2.1rem);
+  bottom: auto;
+  justify-content: flex-start;
   width: min(82vw, 22rem);
   max-height: min(52vh, 20rem);
 }
@@ -382,6 +374,15 @@ html.is-inspecting .journey-lyric-bubble {
     opacity 0.28s ease,
     transform 0.28s ease,
     background 0.2s ease;
+}
+
+.journey-lyrics.is-view-intro .journey-lyric-bubble {
+  transform: translateY(-0.35rem) scale(0.94);
+  transform-origin: top left;
+}
+
+.journey-lyrics.is-view-intro .journey-lyric-bubble.is-in {
+  transform: translateY(0) scale(1);
 }
 
 html.is-gallery .journey-lyric-bubble,
@@ -414,14 +415,12 @@ html.is-wheeling .journey-lyric-bubble {
 }
 
 .experience[data-view="path"] .scroll-hint,
-.experience[data-view="outliers"] .scroll-hint,
 .experience[data-view="combine"] .scroll-hint {
   opacity: 1;
   transform: translateX(-50%);
 }
 
 .experience[data-view="path"] .scroll-hint.is-gone,
-.experience[data-view="outliers"] .scroll-hint.is-gone,
 .experience[data-view="combine"] .scroll-hint.is-gone {
   opacity: 0;
   transform: translateX(-50%) translateY(0.5rem);

@@ -38,12 +38,14 @@ const TUNNEL_IMAGE_CAP = 40;
 const TUNNEL_GAP = 14;
 const TUNNEL_WORLD_SIZE = 20; // fixed world height for cavern planes
 const LAYER_IMAGE_CAP = 36;
+const COMBINE_IMAGE_CAP = 72; // denser deck for page 2 (path + outliers)
 const WHEEL_CARD = 14; // half-extends from hub so cards cross at their centres
 const WHEEL_CAM_Z_BOOK = 62; // landscape rolodex reading distance
 const WHEEL_CAM_Z_CROSS = 78; // radial cross-section viewing distance
 const WHEEL_CAM_Z_NEAR = 26;
 const WHEEL_CAM_Z_FAR = 110;
-const WHEEL_IDLE_SPIN = 0.08; // rad/s — slow drift in cross-section
+const WHEEL_IDLE_SPIN = 0.16; // rad/s — continuous combine rotation
+const COMBINE_AUTO_PAGE = 0.28; // pages/s — slow continuous rolodex walk when idle
 const WHEEL_TIP = -0.38;
 const WHEEL_STACK_SIZE = 22; // shared frame size when layered into one image
 const WHEEL_STACK_Z = 0.04; // tiny depth offset so layers composite cleanly
@@ -107,46 +109,47 @@ let pathThoughts = [];
 let pathAltitudeThoughts = [];
 let lastThoughtKey = "";
 let pathThoughtIndex = -1;
+/** Furthest thought index unlocked by scroll; shown index lags with pauses. */
+let pathThoughtUnlocked = -1;
+let pathThoughtNextAt = 0;
 let lyricBubbleIndex = -1;
 let lyricBubbleEl = null;
 let smoothThoughtProgress = 0;
-/** Staggered text-message intros when entering PATH / OUTLIERS / COMBINE. */
+/** Staggered text-message intros when entering view 1 (path) / 2 (combine). */
 let viewNarrativeToken = 0;
 let viewNarrativeActive = false;
 let viewNarrativeTimers = [];
 const VIEW_NARRATIVES = {
   path: [
     "hello, fellow social climber",
-    "first mountain hike. i kept taking pictures like postcards",
-    "not to send, really — just so i'd have something to hold later",
-    "this is that walk, one frame at a time",
-  ],
-  outliers: [
-    "not everything stayed on the trail",
-    "my phone was counting the day in the background",
-    "7h 51m. 362 pick-ups. half of this i barely remember",
-    "these are the leftovers",
+    "i'm starting to record my hike",
+    "follow me",
   ],
   combine: [
-    "now i can't keep the piles separate",
-    "path, pick-ups, peaks — all of it at once",
-    "i'll flip through until something settles",
+    "i took 707 photos on my iphone and 365 on my camera",
+    "somewhere floating in the cloud, somewhere on my hard drive",
+    "but i want it to settle in my memory",
   ],
 };
 /** Fixed PATH thread after the intro — paced by scroll, not shuffled. */
 const PATH_THOUGHTS_FALLBACK = [
+  "i've always thought",
   "i exist between two extremes",
   "all in or nothing",
   "in equal measure",
   "falling short, standing tall",
   "i am 5 apples tall and i have blind ambition",
   "is this a good idea",
+  "i usually struggle to climb flights of stairs… actually",
+  "breathing is weird",
+  "my screentime hit 7 hours 51 minutes today",
+  "i'm thinking about miley cyrus right now",
+  "just keep going",
   "do you own mountain gear?",
   "why you wearing aw27 then",
-  "i usually struggle to climb flights of stairs… actually",
   "sometimes it's a mountain that i feel emotionally attached to",
-  "because tomorrow marks a full year since i moved to london",
-  "and suddenly everything i knew was measured in distance",
+  "tomorrow marks a full year since i moved to london",
+  "everything i knew was measured in distance",
   "measured about how far i was from everyone i ever knew",
   "and maybe turning 30 means everything exists at the edge",
   "where my body and mind repair at different points",
@@ -154,10 +157,10 @@ const PATH_THOUGHTS_FALLBACK = [
   "and maybe everything i ever wanted was on the other side of this one",
 ];
 const PATH_ALTITUDE_THOUGHTS_FALLBACK = [];
-/** Single experience views: path journey, off-timeline outliers, combined wheel. */
-const EXPERIENCE_VIEWS = ["path", "outliers", "combine"];
+/** Experience views: 1 = path journey, 2 = combine wheel. */
+const EXPERIENCE_VIEWS = ["path", "combine"];
 let experienceView = "path";
-/** Legacy flags kept in sync for path/outliers/combine branches. */
+/** Legacy flags kept in sync for path/combine branches. */
 let viewMode = "elevation"; // "elevation" | "wheel"
 let hikeArrangement = "path"; // "gallery" | "path"
 let timelineFocus = 0;
@@ -2148,6 +2151,39 @@ function pickLayerMarkers(cap = LAYER_IMAGE_CAP) {
   return markers.length <= cap ? markers : spacePick(markers, cap);
 }
 
+/** Combine (page 2) deck — path layers mixed with off-timeline outlier stills. */
+function pickCombineBakeSources(cap = COMBINE_IMAGE_CAP) {
+  const pathCap = Math.max(16, Math.floor(cap * 0.55));
+  const outlierCap = Math.max(16, cap - pathCap);
+
+  const pathMarkers = pickLayerMarkers(pathCap);
+  const outliers = pickOutlierMedia(outlierCap);
+  const pathPaths = new Set(
+    pathMarkers.map((g) => g.userData?.item?.path).filter(Boolean)
+  );
+
+  const sources = [];
+  for (const g of pathMarkers) {
+    sources.push({
+      bake: g,
+      ts: g.userData?.item?.ts ?? 0,
+      path: g.userData?.item?.path || "",
+    });
+  }
+  for (const item of outliers) {
+    if (item?.path && pathPaths.has(item.path)) continue;
+    sources.push({
+      bake: outlierBakeStub(item),
+      ts: item.ts ?? 0,
+      path: item.path || "",
+    });
+  }
+
+  sources.sort((a, b) => a.ts - b.ts);
+  if (sources.length <= cap) return sources.map((s) => s.bake);
+  return spacePick(sources, cap).map((s) => s.bake);
+}
+
 function fibonacciSphere(i, n, radius) {
   if (n <= 1) return new THREE.Vector3(0, 0, radius);
   const y = 1 - (i / Math.max(n - 1, 1)) * 2;
@@ -2328,7 +2364,7 @@ async function ensureWheelBuilt({ force = false } = {}) {
   if (!force && wheelRoot && wheelPlanes.length) return;
   clearWheelWorld();
 
-  const picks = pickLayerMarkers(LAYER_IMAGE_CAP);
+  const picks = pickCombineBakeSources(COMBINE_IMAGE_CAP);
 
   wheelRoot = new THREE.Group();
   wheelRoot.visible = false;
@@ -2342,15 +2378,20 @@ async function ensureWheelBuilt({ force = false } = {}) {
   for (let i = 0; i < n; i++) {
     const mesh = await bakeOneLayerForMarker(picks[i]);
     if (!mesh) continue;
-    const angle = (i / Math.max(n, 1)) * Math.PI * 2;
     mesh.position.set(0, 0, 0);
     mesh.quaternion.identity();
     const aspect = mesh.userData.aspect || 1;
     mesh.scale.set(BOOK_PAGE_SIZE * aspect, BOOK_PAGE_SIZE, 1);
-    mesh.userData.wheelAngle = angle;
     mesh.userData.wheelIndex = wheelPlanes.length;
     wheelPivot.add(mesh);
     wheelPlanes.push(mesh);
+  }
+
+  // Re-space angles with the final baked count
+  const finalN = Math.max(wheelPlanes.length, 1);
+  for (let i = 0; i < wheelPlanes.length; i++) {
+    wheelPlanes[i].userData.wheelAngle = (i / finalN) * Math.PI * 2;
+    wheelPlanes[i].userData.wheelIndex = i;
   }
 
   scene.add(wheelRoot);
@@ -2555,7 +2596,6 @@ function updateWheel(clockSec = 0) {
   if (wheelRoot) wheelRoot.visible = true;
 
   const nStack = Math.max(wheelPlanes.length, 1);
-  const maxPage = Math.max(nStack - 1, 0);
   const clusterTarget = wheelCluster.active ? 1 : 0;
   // Slightly slower gather so the carousel → collage snap reads
   wheelCluster.t += (clusterTarget - wheelCluster.t) * 0.14;
@@ -2564,12 +2604,23 @@ function updateWheel(clockSec = 0) {
   // Scroll → book pages; drag → radial cross-section
   combineCrossT += (combineCrossTarget - combineCrossT) * 0.14;
   const xt = smoothstep(0, 1, combineCrossT) * (1 - ct);
+  const dt = 1 / 60;
 
-  // Momentum page-flick (book via scroll), then soft-snap onto whole pages
+  // Continuous rotate when idle — fan spin + slow page walk
+  const free =
+    !wheelCluster.active && !wheelDrag.active && experienceView === "combine";
+  if (free) {
+    wheelAngleTarget += WHEEL_IDLE_SPIN * dt;
+    if (xt < 0.55 && Math.abs(wheelPageVel) < 0.02) {
+      wheelPageTarget += COMBINE_AUTO_PAGE * dt;
+    }
+  }
+
+  // Momentum page-flick (book via scroll); continuous loop, no hard ends
   if (!wheelCluster.active && xt < 0.55) {
-    wheelPageTarget = clamp(wheelPageTarget + wheelPageVel, 0, maxPage);
+    wheelPageTarget += wheelPageVel;
     wheelPageVel *= 0.86;
-    if (Math.abs(wheelPageVel) < 0.018) {
+    if (!free && Math.abs(wheelPageVel) < 0.018) {
       wheelPageVel = 0;
       wheelPageTarget += (Math.round(wheelPageTarget) - wheelPageTarget) * 0.22;
     }
@@ -2577,7 +2628,12 @@ function updateWheel(clockSec = 0) {
     wheelPageVel *= 0.7;
   }
   wheelPage += (wheelPageTarget - wheelPage) * 0.2;
-  const page = clamp(wheelPage, 0, maxPage);
+  if (Math.abs(wheelPage) > nStack * 8) {
+    const wrap = Math.round(wheelPage / nStack) * nStack;
+    wheelPage -= wrap;
+    wheelPageTarget -= wrap;
+  }
+  const page = wheelPage;
 
   // After scrolling settles, ease back to the drag cross-section
   if (
@@ -2591,21 +2647,14 @@ function updateWheel(clockSec = 0) {
     combineCrossTarget = 1;
   }
 
-  // Cross-section idle spin while free (drag mode)
-  if (
-    !wheelCluster.active &&
-    !wheelDrag.active &&
-    xt > 0.55 &&
-    combineCrossTarget > 0.5
-  ) {
-    wheelAngleTarget += WHEEL_IDLE_SPIN * (1 / 60);
-  }
   if (!wheelCluster.active) {
     wheelAngle += (wheelAngleTarget - wheelAngle) * 0.12;
   }
 
-  wheelPivot.rotation.z = wheelAngle * xt;
+  // Keep the assemble turning; stronger in the drag fan, soft in scroll
+  wheelPivot.rotation.z = wheelAngle * lerp(0.35, 1, xt);
   wheelRoot.rotation.x = WHEEL_TIP * xt;
+  wheelRoot.rotation.y = wheelAngle * 0.22;
 
   const bookCamZ = WHEEL_CAM_Z_BOOK;
   const crossCamZ = WHEEL_CAM_Z_CROSS;
@@ -2628,7 +2677,9 @@ function updateWheel(clockSec = 0) {
     const idx = mesh.userData.wheelIndex ?? 0;
     const stackIdx = mesh.userData.stackOrder ?? idx;
     const angle = mesh.userData.wheelAngle ?? 0;
-    const t = idx - page; // book page offset
+    // Continuous wrap so auto-rotate / scroll never hits a dead end
+    let t = idx - page;
+    t -= nStack * Math.round(t / nStack);
 
     // Landscape-leaning card size without stretching the photo
     const pageW = BOOK_PAGE_SIZE * Math.max(aspect, ROLODEX_LANDSCAPE);
@@ -2725,12 +2776,10 @@ function updateWheel(clockSec = 0) {
     scene.fog.far = Math.max(40, camZ * 1.8);
   }
 
+  const pagePhase =
+    nStack > 0 ? (((page % nStack) + nStack) % nStack) / nStack : 0;
   const progress =
-    activeItem?.ts != null
-      ? timeNormTs(activeItem.ts)
-      : maxPage > 0
-        ? page / maxPage
-        : smoothProgress;
+    activeItem?.ts != null ? timeNormTs(activeItem.ts) : pagePhase;
   updateCornerMeta(clamp(progress, 0, 1), activeItem);
   setBrandWeightFromCloseness(0.5, captionForItem(activeItem));
 }
@@ -2796,9 +2845,6 @@ function applyExperienceFlags() {
   if (experienceView === "combine") {
     viewMode = "wheel";
     hikeArrangement = "path";
-  } else if (experienceView === "outliers") {
-    viewMode = "elevation";
-    hikeArrangement = "gallery";
   } else {
     viewMode = "elevation";
     hikeArrangement = "path";
@@ -2909,10 +2955,6 @@ async function setExperienceView(next) {
 
   const prev = experienceView;
   if (prev === "combine") leaveWheelMode();
-  if (prev === "outliers") {
-    leaveGalleryMode();
-    galleryDrag.active = false;
-  }
   if (prev === "path") leavePathWorld();
 
   experienceView = next;
@@ -2924,21 +2966,13 @@ async function setExperienceView(next) {
 
   try {
     if (next === "combine") await enterWheelMode();
-    else if (next === "outliers") await enterHikeGallery();
     else enterHikePath();
   } catch (err) {
     console.error("Experience view switch failed", next, err);
     if (next === "combine") {
       leaveWheelMode();
       if (els.scrollHint) {
-        els.scrollHint.textContent = "COMBINE FAILED TO LOAD";
-        els.scrollHint.classList.remove("is-gone");
-        hintHidden = false;
-      }
-    } else if (next === "outliers") {
-      leaveGalleryMode();
-      if (els.scrollHint) {
-        els.scrollHint.textContent = "OUTLIERS FAILED TO LOAD";
+        els.scrollHint.textContent = "2 FAILED TO LOAD";
         els.scrollHint.classList.remove("is-gone");
         hintHidden = false;
       }
@@ -3725,19 +3759,63 @@ async function loadPathThoughts() {
 
 function resetPathThoughtBag() {
   pathThoughtIndex = -1;
+  pathThoughtUnlocked = -1;
+  pathThoughtNextAt = 0;
   smoothThoughtProgress = 0;
   lastThoughtKey = "";
 }
 
-/** Map scroll progress → thought index (short open linger, then even pace). */
-function thoughtIndexAtProgress(progress, n) {
+/** Elevation 0..1 at this point on the GPX route. */
+function altitudeNormAtProgress(progress) {
+  const sample = trackSampleAtProgress(progress);
+  if (sample?.ele == null || eleMax <= eleMin) return null;
+  return clamp((sample.ele - eleMin) / (eleMax - eleMin), 0, 1);
+}
+
+/**
+ * Unlock thoughts from the route's altitude profile.
+ * Path progress + elevation gain so the thread climbs with the trail.
+ */
+function thoughtIndexAlongRoute(progress, n) {
   if (n <= 0) return 0;
   if (n === 1) return 0;
-  const p = clamp(progress, 0, 0.9999);
+  const pathT = clamp(progress, 0, 0.9999);
+  const altT = altitudeNormAtProgress(pathT);
+  // Mostly altitude (attach to the climb); a little path distance so flat
+  // stretches still move the thread forward along the route.
+  const routeT =
+    altT == null ? pathT : clamp(altT * 0.72 + pathT * 0.28, 0, 0.9999);
   const firstHold = 0.06;
-  if (p < firstHold) return 0;
-  const u = (p - firstHold) / (1 - firstHold);
+  if (routeT < firstHold) return 0;
+  const u = (routeT - firstHold) / Math.max(1 - firstHold, 1e-6);
   return clamp(Math.floor(u * n), 0, n - 1);
+}
+
+/** Dwell after a line before the next thought can land. */
+function thoughtPauseMs(line, index) {
+  const text = String(line || "");
+  const byLen = clamp(text.length * 22, 400, 1400);
+  let beat = 900;
+  if (/[?]$/.test(text)) beat = 1600;
+  else if (/[.…]$/.test(text)) beat = 1300;
+  else if (/,|—|-/.test(text)) beat = 1100;
+  // Extra breath every few lines so it doesn't feel metronomic
+  const breath = index > 0 && index % 3 === 0 ? 550 : 0;
+  return beat + byLen * 0.45 + breath;
+}
+
+function revealPathThought(index) {
+  const line = formatBubbleText(pathThoughts[index]);
+  if (!line) return;
+  const key = `${index}|${line}`;
+  if (key === lastThoughtKey) return;
+  lastThoughtKey = key;
+  pathThoughtIndex = index;
+  const bubble = ensureThoughtBubble(index);
+  if (!bubble) return;
+  bubble.classList.remove("is-typing");
+  bubble.textContent = line;
+  pathThoughtNextAt = performance.now() + thoughtPauseMs(line, index);
 }
 
 function clearLyricBubbles() {
@@ -3872,7 +3950,7 @@ function ensureThoughtBubble(index) {
   return bubble;
 }
 
-/** Fixed thought thread after the intro — advances with PATH scroll. */
+/** Thought thread after the intro — scroll unlocks lines; pauses pace the reveal. */
 function updatePathThoughts(progress) {
   const stack = els.journeyLyrics;
   if (!stack) return;
@@ -3896,32 +3974,48 @@ function updatePathThoughts(progress) {
   stack.classList.toggle("is-visible", show);
 
   const target = clamp(progress, 0, 1);
-  const lag = target >= smoothThoughtProgress ? 0.04 : 0.08;
+  const lag = target >= smoothThoughtProgress ? 0.035 : 0.08;
   smoothThoughtProgress += (target - smoothThoughtProgress) * lag;
 
   if (!show) {
     if (lastThoughtKey !== "") clearLyricBubbles();
     if (!introActive && progress <= 0.012) {
-      smoothThoughtProgress = 0;
-      pathThoughtIndex = -1;
+      resetPathThoughtBag();
     }
     return;
   }
 
   const n = pathThoughts.length;
-  const index = thoughtIndexAtProgress(smoothThoughtProgress, n);
-  const line = formatBubbleText(pathThoughts[index]);
-  if (!line) return;
+  // Unlock by altitude / route position; pauses still pace each reveal
+  const unlocked = thoughtIndexAlongRoute(smoothThoughtProgress, n);
+  const now = performance.now();
 
-  const key = `${index}|${line}`;
-  if (key === lastThoughtKey) return;
-  lastThoughtKey = key;
-  pathThoughtIndex = index;
+  // Scrolling back — snap the thread to the unlocked line
+  if (pathThoughtIndex >= 0 && unlocked < pathThoughtIndex) {
+    pathThoughtUnlocked = unlocked;
+    pathThoughtNextAt = now;
+    revealPathThought(unlocked);
+    return;
+  }
 
-  const bubble = ensureThoughtBubble(index);
-  if (!bubble) return;
-  bubble.classList.remove("is-typing");
-  bubble.textContent = line;
+  pathThoughtUnlocked = Math.max(pathThoughtUnlocked, unlocked);
+
+  // First thought: short beat after the trail begins
+  if (pathThoughtIndex < 0) {
+    if (pathThoughtNextAt <= 0) {
+      pathThoughtNextAt = now + 700;
+      return;
+    }
+    if (now < pathThoughtNextAt) return;
+    revealPathThought(0);
+    return;
+  }
+
+  // Wait out the pause before the next unlocked thought
+  if (pathThoughtIndex >= pathThoughtUnlocked) return;
+  if (now < pathThoughtNextAt) return;
+
+  revealPathThought(pathThoughtIndex + 1);
 }
 
 function trackSampleAtProgress(progress) {
